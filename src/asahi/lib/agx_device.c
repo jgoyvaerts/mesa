@@ -934,7 +934,10 @@ agx_open_device(void *memctx, struct agx_device *dev)
       goto fail;
    }
 
-   const char *product = agx_chip_exact_product_name(dev->chip);
+   /* The M4 Pro runs as G17P too; it takes the M-series name below. */
+   const char *product = dev->params.chip_id == 0x8140
+                            ? agx_chip_exact_product_name(dev->chip)
+                            : NULL;
    if (product) {
       /* Match the M-series format with the exact GPU codename and revision. */
       snprintf(dev->name, sizeof(dev->name), "Apple %s (%s %02X)", product,

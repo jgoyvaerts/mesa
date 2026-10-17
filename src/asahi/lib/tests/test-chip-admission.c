@@ -94,6 +94,27 @@ main(void)
    bad.num_clusters_total = 4;
    assert(!agx_params_driver_supported(&bad));
 
+   /* The M4 Pro (T6040, G16S, AGX3, HAL200) runs as G17P with its two
+    * clusters; other G16S identities stay G16S and unsupported. */
+   struct drm_asahi_params_global t6040 = g15_params('S', 0x6040, 2);
+   t6040.gpu_generation = 16;
+   t6040.gpu_hal_generation = DRM_ASAHI_GPU_HAL_200;
+   assert(agx_chip_from_params(&t6040) == AGX_CHIP_G17P);
+   assert(agx_params_driver_supported(&t6040));
+
+   bad = t6040;
+   bad.num_clusters_total = 3;
+   assert(!agx_params_driver_supported(&bad));
+
+   bad = t6040;
+   bad.chip_id = 0x6041;
+   assert(agx_chip_from_params(&bad) == AGX_CHIP_G16S);
+   assert(!agx_params_driver_supported(&bad));
+
+   bad = t6040;
+   bad.gpu_hal_generation = DRM_ASAHI_GPU_HAL_LEGACY;
+   assert(agx_chip_from_params(&bad) == AGX_CHIP_G16S);
+
    printf("chip admission: ok\n");
    return 0;
 }

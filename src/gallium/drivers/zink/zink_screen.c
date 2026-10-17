@@ -721,6 +721,15 @@ zink_init_compute_caps(struct zink_screen *screen)
    caps->max_subgroups = screen->info.props13.maxComputeWorkgroupSubgroups;
 }
 
+/* The A18 Pro (0x8140) and the M4 Pro (0x6040) run Honeykrisp's G17P path. */
+static bool
+zink_honeykrisp_g17p(const struct zink_screen *screen)
+{
+   return zink_driverid(screen) == VK_DRIVER_ID_MESA_HONEYKRISP &&
+          (screen->info.props.deviceID == 0x8140 ||
+           screen->info.props.deviceID == 0x6040);
+}
+
 static void
 zink_init_screen_caps(struct zink_screen *screen)
 {
@@ -1146,10 +1155,9 @@ zink_init_screen_caps(struct zink_screen *screen)
     * 32 bytes for double vectors). G17P Honeykrisp advertises INT32_MAX,
     * so an otherwise valid member near the limit can round the block past
     * the limit and overflow its signed size. Expose complete alignment
-    * units on this device, leaving the other Honeykrisp paths unchanged.
+    * units on G17P, leaving the other Honeykrisp paths unchanged.
     */
-   if (zink_driverid(screen) == VK_DRIVER_ID_MESA_HONEYKRISP &&
-       screen->info.props.deviceID == 0x8140)
+   if (zink_honeykrisp_g17p(screen))
       caps->max_shader_buffer_size &= ~31u;
 
    caps->fs_coord_origin_upper_left = true;
@@ -2806,8 +2814,7 @@ zink_get_sparse_texture_virtual_page_size(struct pipe_screen *pscreen,
                                  VK_IMAGE_USAGE_STORAGE_BIT;
    use_flags |= is_zs ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
    VkImageUsageFlags flags = zink_get_format_props(screen, pformat)->optimalTilingFeatures & use_flags;
-   if (zink_driverid(screen) == VK_DRIVER_ID_MESA_HONEYKRISP &&
-       screen->info.props.deviceID == 0x8140) {
+   if (zink_honeykrisp_g17p(screen)) {
       /* Admit sparse textures per target/format. A missing page size is
        * represented by NUM_VIRTUAL_PAGE_SIZES = 0, without disabling sparse
        * textures for the other targets. Format feature bits and image usage
@@ -3292,12 +3299,11 @@ init_driver_workarounds(struct zink_screen *screen)
     * it and recreate an image with it before a draw or copy first reads the
     * image while writing it (zink_update_lazy_feedback_loops()).
     *
-    * Only G17P (device ID 0x8140) compresses on this rule; other Honeykrisp
-    * parts keep the usage on every render target.
+    * Only G17P compresses on this rule; other Honeykrisp parts keep the
+    * usage on every render target.
     */
    screen->driver_workarounds.lazy_feedback_loop_usage =
-      zink_driverid(screen) == VK_DRIVER_ID_MESA_HONEYKRISP &&
-      screen->info.props.deviceID == 0x8140 &&
+      zink_honeykrisp_g17p(screen) &&
       screen->driver_workarounds.general_layout &&
       screen->info.have_EXT_attachment_feedback_loop_layout;
 

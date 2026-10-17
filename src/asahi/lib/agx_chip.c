@@ -56,7 +56,17 @@ agx_chip_from_params(const struct drm_asahi_params_global *params)
       switch (params->gpu_variant) {
       case 'P': return AGX_CHIP_G16P;
       case 'G': return AGX_CHIP_G16G;
-      case 'S': return AGX_CHIP_G16S;
+      case 'S':
+         /* The M4 Pro (T6040) on the G17 kernel runtime takes the A18 Pro's
+          * contract: its firmware has the A18 Pro firmware's interface, and
+          * every G16S axis in these tables (AGX3B, HAL200, Gen9, Gen4-HAL200,
+          * 32-byte sampler heap, dual submission) equals G17P's.
+          */
+         if (params->chip_id == 0x6040 &&
+             params->usc_generation == AGX_ISA_AGX3 &&
+             params->gpu_hal_generation == DRM_ASAHI_GPU_HAL_200)
+            return AGX_CHIP_G17P;
+         return AGX_CHIP_G16S;
       case 'C': return AGX_CHIP_G16C;
       default: return AGX_CHIP_UNKNOWN;
       }
@@ -276,13 +286,18 @@ agx_params_driver_supported(const struct drm_asahi_params_global *params)
       return false;
 
    switch (chip) {
-   case AGX_CHIP_G17P:
+   case AGX_CHIP_G17P: {
       /* Honeykrisp's first AGX3 path is the exact T8140/A18 Pro contract.
        * Do not let the shared G17P ISA name admit another SoC or topology. */
-      return params->chip_id == 0x8140 && params->num_dies == 1 &&
-             params->num_clusters_total == 1 &&
+      const bool a18_pro =
+         params->chip_id == 0x8140 && params->num_clusters_total == 1;
+      /* M4 Pro: two clusters (a binned part keeps two). */
+      const bool m4_pro =
+         params->chip_id == 0x6040 && params->num_clusters_total == 2;
+      return (a18_pro || m4_pro) && params->num_dies == 1 &&
              params->usc_generation == AGX_ISA_AGX3 &&
              params->gpu_hal_generation == DRM_ASAHI_GPU_HAL_200;
+   }
    case AGX_CHIP_G15S:
       /* T6030/M3 Pro: one die, two clusters, AGX3 shaders on the legacy
        * (pre-HAL200) firmware interface. */
