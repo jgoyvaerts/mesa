@@ -1382,7 +1382,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
       }
 
       memset(map, 0, usc_base_size);
-      agx3_build_container_lead(map);
+      agx3_build_container_lead(map, dev->chip);
       agx_bo_assert_range(usc_base, 0, usc_base_size);
 
    }
