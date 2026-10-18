@@ -280,15 +280,6 @@ agx_chip_sampler_heap_element_size(enum agx_chip chip)
    }
 }
 
-/* Number of helper-table slots in the USC code-container lead block.  G17P
- * has six; G15 and G16 parts have ten, and with six their fragment programs
- * of 256x256 and larger walk past the lead into the guard page. */
-static inline unsigned
-agx_chip_usc_helper_table_slots(enum agx_chip chip)
-{
-   return chip == AGX_CHIP_G17P ? 6 : 10;
-}
-
 /*
  * Whether this driver can generate code for a chip.
  *

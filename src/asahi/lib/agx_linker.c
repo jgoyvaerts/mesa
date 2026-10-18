@@ -138,9 +138,12 @@ static const uint8_t sample_loop_footer[] = {
 #define AGX3_CONTAINER_BLOCK_HDR   0x40u
 #define AGX3_CONTAINER_CONST_PROG  0x40u
 
-/* "0f 00 54 <opcode> 00 x6 06 00 06 00 06 00" per record, then two terminals.
- * The opcodes count down by 0x10 from 0x10 * slots, so G17P's six slots are
- * 0x60..0x10 and the ten-slot table of G15 and G16 parts is 0xa0..0x10. */
+/* "0f 00 54 <opcode> 00 x6 06 00 06 00 06 00" per record, then two terminals. */
+/* One helper table per cluster. The state loader's profile prefix calls the
+ * table slot at base page + 0x100 + 16 * core id (id = 16 * cluster + core), so
+ * each table needs one slot per core of its cluster: six on the A18 Pro, ten on
+ * the M4 Pro. A core whose slot is missing runs off the table and never runs its
+ * work (the M4 Pro's cluster 1 cores 8 and 9 skipped their tiles with six). */
 static void
 agx3_fill_helper_table(uint8_t *image, size_t base, unsigned slots)
 {
@@ -149,7 +152,6 @@ agx3_fill_helper_table(uint8_t *image, size_t base, unsigned slots)
       0x06, 0x00, 0x06, 0x00, 0x06, 0x00, 0x06, 0x00,
    };
 
-   assert(slots <= 14 && "both tables fit below the block-size dword");
    for (unsigned i = 0; i < slots; ++i) {
       uint8_t *record = image + base + i * 0x10;
 
@@ -176,11 +178,13 @@ agx3_container_size(size_t code_size)
 
 /* The container's leading block: dword 0x340, 0x0006 filler, two helper
  * tables. Identical in both captured Apple code images, so it is a fixed
- * prologue rather than anything workload-specific. */
+ * prologue rather than anything workload-specific; only the table length
+ * follows the cores per cluster. */
 void
-agx3_build_container_lead(uint8_t *image, enum agx_chip chip)
+agx3_build_container_lead(uint8_t *image, unsigned cores_per_cluster)
 {
-   const unsigned slots = agx_chip_usc_helper_table_slots(chip);
+   /* Both tables and their two terminals fit in 0x100 bytes. */
+   assert(cores_per_cluster >= 1 && cores_per_cluster <= 14);
 
    memset(image, 0, AGX3_CONTAINER_LEAD);
    agx_store_le32(image, AGX3_CONTAINER_LEAD);
@@ -188,16 +192,16 @@ agx3_build_container_lead(uint8_t *image, enum agx_chip chip)
       image[offset] = 0x06;
       image[offset + 1] = 0x00;
    }
-   agx3_fill_helper_table(image, 0x100, slots);
-   agx3_fill_helper_table(image, 0x200, slots);
+   agx3_fill_helper_table(image, 0x100, cores_per_cluster);
+   agx3_fill_helper_table(image, 0x200, cores_per_cluster);
 }
 
 static void
-agx3_build_container(uint8_t *image, enum agx_chip chip, size_t code_size,
-                     bool fragment, bool sampled_fragment)
+agx3_build_container(uint8_t *image, size_t code_size, bool fragment,
+                     bool sampled_fragment, unsigned cores_per_cluster)
 {
    memset(image, 0, agx3_container_size(code_size));
-   agx3_build_container_lead(image, chip);
+   agx3_build_container_lead(image, cores_per_cluster);
 
    agx_store_le32(image + AGX3_CONTAINER_LEAD,
                  AGX3_CONTAINER_BLOCK_HDR + AGX3_CONTAINER_CONST_PROG +
@@ -382,8 +386,9 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
    }
 
    if (container)
-      agx3_build_container(container_map, dev->chip, size, fragment,
-                           fragment && sampled_fragment);
+      agx3_build_container(container_map, size, fragment,
+                           fragment && sampled_fragment,
+                           dev->params.num_cores_per_cluster);
 
    size_t offset = 0;
    if (colour_fused) {

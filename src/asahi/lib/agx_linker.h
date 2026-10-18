@@ -83,9 +83,10 @@ struct agx_linked_shader {
    struct agx_fragment_control_packed fragment_control;
 };
 
-/* Write the AGX3 code container's fixed leading block. Its size lives in
- * agx_ioto_program_core.h so decoders can share it. */
-void agx3_build_container_lead(uint8_t *image, enum agx_chip chip);
+/* Write the AGX3 code container's leading block, with one helper-table slot
+ * per core of a cluster. Its size lives in agx_ioto_program_core.h so decoders
+ * can share it. */
+void agx3_build_container_lead(uint8_t *image, unsigned cores_per_cluster);
 
 bool agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
                    bool fragment, struct agx_shader_part *main,
