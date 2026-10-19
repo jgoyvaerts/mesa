@@ -11200,7 +11200,8 @@ hk_begin_end_xfb(VkCommandBuffer commandBuffer, uint32_t firstCounterBuffer,
       }
    }
 
-   for (unsigned i = 0; i < counterBufferCount; ++i) {
+   /* pCounterBuffers may be NULL with a non-zero count: no counter buffers. */
+   for (unsigned i = 0; pCounterBuffers && i < counterBufferCount; ++i) {
       if (pCounterBuffers[i] == VK_NULL_HANDLE)
          continue;
 
