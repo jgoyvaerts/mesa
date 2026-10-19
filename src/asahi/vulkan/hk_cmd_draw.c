@@ -8345,6 +8345,20 @@ hk_g17p_draw_primitive_supported(enum agx_primitive topology)
  * HAL200 draw body (indirect, indexed or direct).  Shared by hk_draw_impl()
  * and hk_g17p_emit_indirect_record().  Returns false with the command buffer
  * error set when the draw cannot be encoded. */
+/* The restart value of a G17P indexed draw: the API's (all ones for the index
+ * type unless vkCmdSetPrimitiveRestartIndexEXT set a custom one), or the fixed
+ * all-ones value of the synthetic indexed draw geometry/XFB lowering emits. */
+static uint32_t
+hk_g17p_restart_index(struct hk_cmd_buffer *cmd, struct agx_draw draw)
+{
+   uint32_t mask = BITFIELD_MASK(8 * agx_index_size_to_B(draw.index_size));
+
+   if (cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY])
+      return mask;
+
+   return cmd->vk.dynamic_graphics_state.ia.primitive_restart_index & mask;
+}
+
 static bool
 hk_g17p_emit_draw(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t *out,
                   struct agx_draw draw, enum agx_primitive topology,
@@ -8367,13 +8381,8 @@ hk_g17p_emit_draw(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t *out,
          .index_size_B =
             draw.indexed ? agx_index_size_to_B(draw.index_size) : 0,
          .restart_enable = draw.restart,
-         /* Geometry/XFB lowers a non-indexed API draw to a synthetic
-          * indexed draw.  Derive the fixed Vulkan restart value from
-          * that draw, not from the original bound-index state. */
-         .restart_index = draw.indexed
-                             ? agx_primitive_restart_index(
-                                  draw.index_size)
-                             : 0,
+         .restart_index =
+            draw.indexed ? hk_g17p_restart_index(cmd, draw) : 0,
          .index_buffer = draw.index_buffer,
          .index_buffer_range_B = draw.index_buffer_range_B,
          /* Unlike PPP and stream-link pointers, the Index List
@@ -8426,9 +8435,7 @@ hk_g17p_emit_draw(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t *out,
 
       const uint64_t ib = draw.index_buffer + offset_B;
       w[n++] = UINT32_C(0x40000001);
-      w[n++] = index_size_B == 1   ? UINT32_C(0xff)
-               : index_size_B == 2 ? UINT32_C(0xffff)
-                                   : UINT32_MAX;
+      w[n++] = hk_g17p_restart_index(cmd, draw);
       w[n++] = UINT32_C(0x61f00000) | (uint32_t)((ib >> 32) & 0xff) |
                ((uint32_t)topology << 8) |
                ((uint32_t)draw.index_size << 17) |
@@ -8891,7 +8898,8 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
                                   draw_state_offset,
                                   g17p_native_bind_tail_emitted,
                                   empty_draw_jump,
-                                  draw.index_size);
+                                  draw.index_size,
+                                  hk_g17p_restart_index(cmd, draw));
       } else {
          if (dev->dev.chip == AGX_CHIP_G17P) {
             if (!hk_g17p_emit_draw(cmd, cs, out, draw, topology,

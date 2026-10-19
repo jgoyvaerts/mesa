@@ -847,12 +847,13 @@ agx_robust_index_shadow_sizes(uint32_t count, enum agx_index_size index_size,
  * body unchanged.
  */
 static inline GLOBAL uint32_t *
-agx_vdm_draw_robust_index(GLOBAL uint32_t *out, enum agx_chip chip,
-                          struct agx_draw draw,
-                          enum agx_primitive topology,
-                          uint32_t draw_state_context_offset,
-                          bool render_state_emitted,
-                          uint64_t empty_draw_jump)
+agx_vdm_draw_robust_index_restart(GLOBAL uint32_t *out, enum agx_chip chip,
+                                  struct agx_draw draw,
+                                  enum agx_primitive topology,
+                                  uint32_t draw_state_context_offset,
+                                  bool render_state_emitted,
+                                  uint64_t empty_draw_jump,
+                                  uint32_t restart_index)
 {
    /* G17P's native direct indexed packet requires both counts to be nonzero.
     * Indirect-count predication deliberately zeros records above the runtime
@@ -895,7 +896,7 @@ agx_vdm_draw_robust_index(GLOBAL uint32_t *out, enum agx_chip chip,
             *out++ = draw_state_context_offset;
 
          *out++ = 0x40000001u;
-         *out++ = agx_primitive_restart_index(draw.index_size);
+         *out++ = restart_index;
       }
 
       for (unsigned i = 0; i < words.count; ++i)
@@ -916,6 +917,19 @@ agx_vdm_draw_robust_index(GLOBAL uint32_t *out, enum agx_chip chip,
    *out++ = draw.index_bias;
    *out++ = align(range_B, 4) >> 2;
    return out;
+}
+
+/* With the fixed all-ones restart value of the index type. */
+static inline GLOBAL uint32_t *
+agx_vdm_draw_robust_index(GLOBAL uint32_t *out, enum agx_chip chip,
+                          struct agx_draw draw, enum agx_primitive topology,
+                          uint32_t draw_state_context_offset,
+                          bool render_state_emitted, uint64_t empty_draw_jump)
+{
+   return agx_vdm_draw_robust_index_restart(
+      out, chip, draw, topology, draw_state_context_offset,
+      render_state_emitted, empty_draw_jump,
+      agx_primitive_restart_index(draw.index_size));
 }
 
 static inline unsigned
