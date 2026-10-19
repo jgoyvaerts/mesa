@@ -3423,8 +3423,11 @@ wsi_wl_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
                                      rect->extent.width, rect->extent.height);
          }
       } else {
+         /* The whole image, in its own size: INT32_MAX here overflows when the compositor scales
+          * buffer damage to output space (Hyprland at scale 2 then repaints only the top-left
+          * quadrant of the window). */
          wl_surface_damage_buffer(wsi_wl_surface->wayland_surface.wrapper,
-				  0, 0, INT32_MAX, INT32_MAX);
+				  0, 0, chain->extent.width, chain->extent.height);
       }
    } else {
       /* If the compositor doesn't support damage_buffer, we deliberately
