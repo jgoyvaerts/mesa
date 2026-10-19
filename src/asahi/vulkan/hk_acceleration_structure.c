@@ -1569,7 +1569,7 @@ fail:
 VkResult
 hk_device_init_accel_struct_state(struct hk_device *dev)
 {
-   dev->g17p_native_as = hk_g17p_rt_enabled(dev->dev.chip);
+   dev->g17p_native_as = hk_g17p_rt_enabled(dev->dev.chip, dev->dev.params.features);
    const char *capture=getenv("ASAHI_G17P_RQ_CAPTURE_DIR");
    if(capture && dev->g17p_native_as && !hk_gen1_rq_init(dev,capture))
       return vk_error(dev,VK_ERROR_INITIALIZATION_FAILED);

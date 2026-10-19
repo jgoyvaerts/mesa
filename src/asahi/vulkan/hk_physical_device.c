@@ -74,8 +74,8 @@ hk_hash_device_generation_contract(blake3_hasher *ctx,
       agx_chip_descriptor_generation(dev->chip),
       agx_chip_sampler_generation(dev->chip),
       agx_chip_sampler_heap_element_size(dev->chip),
-      hk_g17p_rt_enabled(dev->chip),
-      hk_g17p_rt_enabled(dev->chip),
+      hk_g17p_rt_enabled(dev->chip, dev->params.features),
+      hk_g17p_rt_enabled(dev->chip, dev->params.features),
    };
 
    _mesa_blake3_update(ctx, values, sizeof(values));
@@ -1772,7 +1772,7 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
 
    struct vk_device_extension_table supported_extensions;
    hk_get_device_extensions(instance, &supported_extensions);
-   if (hk_g17p_rt_enabled(pdev->dev.chip)) {
+   if (hk_g17p_rt_enabled(pdev->dev.chip, pdev->dev.params.features)) {
       supported_extensions.KHR_acceleration_structure = true;
       supported_extensions.KHR_deferred_host_operations = true;
       supported_extensions.KHR_ray_query =

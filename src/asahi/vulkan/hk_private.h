@@ -12,6 +12,7 @@
 #include "vk_log.h"
 #include "util/u_debug.h"
 #include "asahi/lib/agx_chip.h"
+#include "drm-uapi/asahi_drm.h"
 #include "vk_util.h"
 
 #define HK_MAX_SETS                      16
@@ -59,8 +60,16 @@ struct hk_addr_range {
          mesa_log(MESA_LOG_WARN, (MESA_LOG_TAG), (fmt), ##__VA_ARGS__);        \
    } while (0)
 
+/*
+ * Ray tracing needs the kernel's opt-in as well: on the M4 Pro's 25G83 firmware a stalled
+ * traversal wedges the whole GPU, so that kernel neither advertises
+ * DRM_ASAHI_FEATURE_RENDER_RAY_QUERY nor accepts ray-traversal work unless
+ * asahi.t6040_ray_tracing=1.  Without the bit, no ray tracing extension is exposed.
+ */
 static inline bool
-hk_g17p_rt_enabled(enum agx_chip chip)
+hk_g17p_rt_enabled(enum agx_chip chip, uint64_t kernel_features)
 {
-   return chip == AGX_CHIP_G17P && !debug_get_bool_option("ASAHI_G17P_RT_DISABLE", false);
+   return chip == AGX_CHIP_G17P &&
+          (kernel_features & DRM_ASAHI_FEATURE_RENDER_RAY_QUERY) &&
+          !debug_get_bool_option("ASAHI_G17P_RT_DISABLE", false);
 }
