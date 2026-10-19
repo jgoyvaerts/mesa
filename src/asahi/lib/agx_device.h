@@ -173,6 +173,8 @@ struct agx_device {
 
    /* Global queue handle */
    uint32_t queue_id;
+   /* AGX_DBG_1QUEUE: render SCS layouts the shared queue was created with. */
+   uint64_t queue_layouts[2];
 
    /* VMA heaps */
    simple_mtx_t vma_lock;

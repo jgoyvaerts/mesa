@@ -1454,16 +1454,21 @@ uint32_t
 agx_create_command_queue_with_render_scs(struct agx_device *dev,
    enum drm_asahi_priority priority, const uint64_t layouts[2])
 {
-   if ((dev->debug & AGX_DBG_1QUEUE) && (layouts[0] || layouts[1])) {
-      errno = EINVAL;
-      return UINT32_MAX;
-   }
-
    if (dev->debug & AGX_DBG_1QUEUE) {
       // Abuse this lock for this, it's debug only anyway
       simple_mtx_lock(&dev->vma_lock);
       if (dev->queue_id) {
+         /* The shared queue serves a later caller only if it was created with
+          * every render SCS layout that caller needs (Vulkan's first queue
+          * brings the ray-query layout; GL needs none). */
+         const bool covered =
+            (!layouts[0] || layouts[0] == dev->queue_layouts[0]) &&
+            (!layouts[1] || layouts[1] == dev->queue_layouts[1]);
          simple_mtx_unlock(&dev->vma_lock);
+         if (!covered) {
+            errno = EINVAL;
+            return UINT32_MAX;
+         }
          return dev->queue_id;
       }
    }
@@ -1490,6 +1495,8 @@ agx_create_command_queue_with_render_scs(struct agx_device *dev,
 
    if (dev->debug & AGX_DBG_1QUEUE) {
       dev->queue_id = queue_create.queue_id;
+      dev->queue_layouts[0] = layouts[0];
+      dev->queue_layouts[1] = layouts[1];
       simple_mtx_unlock(&dev->vma_lock);
    }
 
