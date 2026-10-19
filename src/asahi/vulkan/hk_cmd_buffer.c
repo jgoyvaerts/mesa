@@ -3519,7 +3519,21 @@ clear_attachment_as_image(struct hk_cmd_buffer *cmd,
                           struct hk_attachment *att, unsigned aspect)
 {
    struct hk_image_view *view = att->iview;
-   if (!att->clear || !view || !(view->vk.aspects & aspect))
+   if (!att->clear || !view)
+      return;
+
+   /* A depth/stencil attachment uses every aspect of its image whatever the
+    * view's aspect mask says (the mask is ignored for render pass depth/stencil
+    * attachments), so a depth-only view bound as the stencil attachment must
+    * still have its stencil cleared. Its view format then names only the depth
+    * aspect, so take the format from the image. Colour keeps the view format,
+    * in which the clear value is expressed.
+    */
+   const bool zs = aspect & (VK_IMAGE_ASPECT_DEPTH_BIT |
+                             VK_IMAGE_ASPECT_STENCIL_BIT);
+   const VkImageAspectFlags aspects = zs ? view->vk.image->aspects
+                                         : view->vk.aspects;
+   if (!(aspects & aspect))
       return;
 
    const uint32_t layer_count = render->view_mask
@@ -3531,11 +3545,11 @@ clear_attachment_as_image(struct hk_cmd_buffer *cmd,
       .levelCount = 1,
       .baseArrayLayer = view->vk.base_array_layer,
       .baseMipLevel = view->vk.base_mip_level,
-      .aspectMask = view->vk.aspects & aspect,
+      .aspectMask = aspects & aspect,
    };
 
    assert(util_bitcount(range.aspectMask) == 1);
-   VkFormat format = att->vk_format;
+   VkFormat format = zs ? view->vk.image->format : att->vk_format;
 
    if (aspect == VK_IMAGE_ASPECT_DEPTH_BIT) {
       format = vk_format_depth_only(format);
