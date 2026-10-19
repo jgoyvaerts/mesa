@@ -213,11 +213,13 @@ static void
 libagx_memcpy_to_aligned(global uint *dst, constant uchar *src, uint len,
                          uint tid, uint group_size)
 {
-   /* Copy a few bytes at the start */
+   /* Copy a few bytes at the start, then continue after them in both */
+   global uchar *dst_B = (global uchar *)dst;
    uint start_unaligned = ((uintptr_t)src) & 3;
    if (start_unaligned) {
-      uint need = 4 - start_unaligned;
-      libagx_memcpy_small((global uchar *)dst, src, need, tid);
+      uint need = min(4 - start_unaligned, len);
+      libagx_memcpy_small(dst_B, src, need, tid);
+      dst_B += need;
       src += need;
       len -= need;
    }
@@ -225,12 +227,18 @@ libagx_memcpy_to_aligned(global uint *dst, constant uchar *src, uint len,
    /* Copy a few bytes at the end */
    uint end_unaligned = len & 0xf;
    len -= end_unaligned;
-   libagx_memcpy_small(((global uchar *)dst) + len, src + len, end_unaligned,
-                       tid);
+   libagx_memcpy_small(dst_B + len, src + len, end_unaligned, tid);
 
-   /* Now both src and dst are word-aligned, and len is 16-aligned */
-   libagx_memcpy_aligned_uint4(dst, (constant uint *)src, len / 16, tid,
-                               group_size);
+   /* Now src is word-aligned and len is 16-aligned. dst_B is word-aligned
+    * only when src was: an unaligned source leaves it at an odd offset, so
+    * copy the body bytewise in that case. */
+   if (start_unaligned) {
+      for (uint i = tid; i < len; i += group_size)
+         dst_B[i] = src[i];
+   } else {
+      libagx_memcpy_aligned_uint4(dst, (constant uint *)src, len / 16, tid,
+                                  group_size);
+   }
 }
 
 /* Precondition: len must be < the group size */
