@@ -206,6 +206,7 @@ hk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
    util_dynarray_fini(&cmd->large_bos);
    free(cmd->retained_set);
    util_dynarray_fini(&cmd->sync_pass_records);
+   util_dynarray_fini(&cmd->oq_ends);
    vk_command_buffer_finish(&cmd->vk);
    vk_free(&pool->vk.alloc, cmd);
 }
@@ -296,6 +297,7 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    cmd->geom_instance_count = 0;
    cmd->uses_heap = false;
    hk_sync_reset(cmd);
+   util_dynarray_clear(&cmd->oq_ends);
 
    memset(&cmd->state, 0, sizeof(cmd->state));
    for (unsigned i = 0; i < HK_G17P_BG_EOT_CACHE_ENTRIES; ++i)
