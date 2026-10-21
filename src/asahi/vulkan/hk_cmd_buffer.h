@@ -1308,6 +1308,9 @@ struct hk_cmd_buffer {
     * instance footprint, in recording order. Cleared by hk_sync_reset. */
    struct util_dynarray sync_pass_records;
 
+   /* struct hk_oq_end for every occlusion query this command buffer ends. */
+   struct util_dynarray oq_ends;
+
    /* Are we currently inside a vk_meta operation? This alters sample location
     * behaviour.
     */

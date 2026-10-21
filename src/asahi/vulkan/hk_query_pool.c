@@ -6,18 +6,23 @@
  */
 #include "hk_query_pool.h"
 
+#include <errno.h>
+#include <xf86drm.h>
+
 #include "agx_compile.h"
 #include "agx_pack.h"
 #include "hk_buffer.h"
 #include "hk_cmd_buffer.h"
 #include "hk_device.h"
 #include "hk_entrypoints.h"
+#include "hk_queue.h"
 #include "hk_pipeline_statistics_core.h"
 #include "hk_shader.h"
 #include "hk_acceleration_structure.h"
 
 #include "libagx_dgc.h"
 #include "libagx_shaders.h"
+#include "vk_alloc.h"
 #include "vk_common_entrypoints.h"
 
 #include "asahi/lib/agx_bo.h"
@@ -543,6 +548,17 @@ hk_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
    uint16_t *oq_index = hk_pool_oq_index_ptr(pool);
    assert(oq_index || !occlusion_queries);
 
+   if (occlusion_queries) {
+      pool->oq_submit =
+         vk_zalloc2(&dev->vk.alloc, pAllocator,
+                    sizeof(*pool->oq_submit) * occlusion_queries, 8,
+                    VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      if (!pool->oq_submit) {
+         hk_DestroyQueryPool(device, hk_query_pool_to_handle(pool), pAllocator);
+         return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+      }
+   }
+
    for (unsigned i = 0; i < occlusion_queries; ++i) {
       uint64_t zero = 0;
       unsigned index;
@@ -588,6 +604,7 @@ hk_DestroyQueryPool(VkDevice device, VkQueryPool queryPool,
       dev->dev.ops.bo_unbind_object(&dev->dev, pool->handle);
 
    agx_bo_unreference(&dev->dev, pool->bo);
+   vk_free2(&dev->vk.alloc, pAllocator, pool->oq_submit);
    vk_query_pool_destroy(&dev->vk, pAllocator, &pool->vk);
 }
 
@@ -599,6 +616,9 @@ hk_ResetQueryPool(VkDevice device, VkQueryPool queryPool, uint32_t firstQuery,
    VK_FROM_HANDLE(hk_device, dev, device);
 
    host_zero_queries(dev, pool, firstQuery, queryCount, false);
+
+   for (uint32_t i = 0; pool->oq_submit && i < queryCount; i++)
+      p_atomic_set(&pool->oq_submit[firstQuery + i].point, 0);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -702,6 +722,10 @@ hk_cmd_begin_end_query(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
       uint16_t *oq_index = hk_pool_oq_index_ptr(pool);
       cmd->state.gfx.occlusion.index = oq_index[query];
       cmd->state.gfx.dirty |= HK_DIRTY_OCCLUSION;
+      if (end) {
+         const struct hk_oq_end oq_end = {.pool = pool, .query = query};
+         util_dynarray_append(&cmd->oq_ends, oq_end);
+      }
       graphics = true;
       break;
    }
@@ -814,6 +838,77 @@ hk_query_is_available(struct hk_device *dev, struct hk_query_pool *pool,
 
 #define HK_QUERY_TIMEOUT 2000000000ull
 
+void
+hk_query_note_submit(struct hk_cmd_buffer *cmd, struct hk_queue *queue,
+                     uint64_t point)
+{
+   util_dynarray_foreach(&cmd->oq_ends, struct hk_oq_end, e) {
+      struct hk_oq_submit *s = &e->pool->oq_submit[e->query];
+      /* Readers check the point again after the syncobj: clear it first so
+       * they never pair this syncobj with the previous point. */
+      p_atomic_set(&s->point, 0);
+      p_atomic_set(&s->syncobj, queue->drm.syncobj);
+      p_atomic_set(&s->point, point);
+   }
+}
+
+/*
+ * A render's occlusion counts reach memory with its end-of-render cache
+ * maintenance. The availability word is written by a compute stream that
+ * the firmware starts once the render's fragment work is done, which can be
+ * before that maintenance: the CPU then reads availability 1 and a count of
+ * 0 that is right shortly after. The kernel signals a submission only
+ * after the maintenance of all its renders, so a CPU read of an occlusion
+ * result also requires the submission that ended the query.
+ */
+static VkResult
+hk_oq_submission_done(struct hk_device *dev, struct hk_query_pool *pool,
+                      uint32_t query, bool wait, bool *done,
+                      struct hk_oq_submit *known)
+{
+   *done = true;
+   if (!pool->oq_submit)
+      return VK_SUCCESS;
+
+   const struct hk_oq_submit *s = &pool->oq_submit[query];
+   uint64_t point;
+   uint32_t syncobj;
+   do {
+      point = p_atomic_read(&s->point);
+      syncobj = p_atomic_read(&s->syncobj);
+   } while (point != p_atomic_read(&s->point));
+   /* known: the latest point this read already saw signalled. */
+   if (!point || (syncobj == known->syncobj && point <= known->point))
+      return VK_SUCCESS;
+
+   /* Bounded waits so a lost device is noticed; a hung submission ends in
+    * the kernel's own timeout. */
+   for (;;) {
+      int64_t timeout = wait ? (int64_t)os_time_get_absolute_timeout(100000000)
+                             : 0;
+      /* WAIT_FOR_SUBMIT: the point is noted just before the submit ioctl. */
+      int ret = drmSyncobjTimelineWait(dev->dev.fd, &syncobj, &point, 1,
+                                       timeout,
+                                       DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT,
+                                       NULL);
+      if (ret == 0) {
+         *known = (struct hk_oq_submit){.syncobj = syncobj, .point = point};
+         return VK_SUCCESS;
+      }
+      if (ret != -ETIME)
+         return vk_device_set_lost(&dev->vk,
+                                   "occlusion query submission wait: %d", ret);
+      if (!wait) {
+         *done = false;
+         return VK_SUCCESS;
+      }
+
+      VkResult status = vk_device_check_status(&dev->vk);
+      if (status != VK_SUCCESS)
+         return status;
+   }
+}
+
 static VkResult
 hk_query_wait_for_available(struct hk_device *dev, struct hk_query_pool *pool,
                             uint32_t query)
@@ -845,6 +940,7 @@ hk_GetQueryPoolResults(VkDevice device, VkQueryPool queryPool,
       return VK_ERROR_DEVICE_LOST;
 
    VkResult status = VK_SUCCESS;
+   struct hk_oq_submit known = {0};
    for (uint32_t i = 0; i < queryCount; i++) {
       const uint32_t query = firstQuery + i;
 
@@ -856,6 +952,14 @@ hk_GetQueryPoolResults(VkDevice device, VkQueryPool queryPool,
             return status;
 
          available = true;
+      }
+
+      if (available) {
+         VkResult done = hk_oq_submission_done(
+            dev, pool, query, flags & VK_QUERY_RESULT_WAIT_BIT, &available,
+            &known);
+         if (done != VK_SUCCESS)
+            return done;
       }
 
       const struct hk_query_report *src = hk_query_report_map(dev, pool, query);

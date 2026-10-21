@@ -27,7 +27,26 @@ struct hk_query_pool {
    uint32_t handle;
 
    unsigned oq_queries;
+
+   /* Occlusion queries: the queue timeline point of the latest submission
+    * that ended each query, 0 if none since the last host reset. */
+   struct hk_oq_submit {
+      uint32_t syncobj;
+      uint64_t point;
+   } *oq_submit;
 };
+
+struct hk_cmd_buffer;
+struct hk_queue;
+
+struct hk_oq_end {
+   struct hk_query_pool *pool;
+   uint32_t query;
+};
+
+/* Record the queue timeline point that the submission of cmd signals. */
+void hk_query_note_submit(struct hk_cmd_buffer *cmd, struct hk_queue *queue,
+                          uint64_t point);
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(hk_query_pool, vk.base, VkQueryPool,
                                VK_OBJECT_TYPE_QUERY_POOL)

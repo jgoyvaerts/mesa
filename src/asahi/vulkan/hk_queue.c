@@ -27,6 +27,7 @@
 #include "hk_execution_allowance.h"
 #include "hk_image.h"
 #include "hk_physical_device.h"
+#include "hk_query_pool.h"
 #include "hk_sparse.h"
 
 #include <errno.h>
@@ -1145,6 +1146,11 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
       .handle = queue->drm.syncobj,
       .timeline_value = ++queue->drm.timeline_value,
    };
+
+   for (unsigned i = 0; i < submit->command_buffer_count; ++i) {
+      hk_query_note_submit((struct hk_cmd_buffer *)submit->command_buffers[i],
+                           queue, queue->drm.timeline_value);
+   }
 
    /* Now setup the command structs */
    struct util_dynarray payload = UTIL_DYNARRAY_INIT;
