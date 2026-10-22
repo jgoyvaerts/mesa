@@ -1035,6 +1035,10 @@ asahi_ioctl_vm_create_unlocked(int fd, unsigned long request, void *arg)
 {
    struct drm_asahi_vm_create *create = arg;
 
+   /* As the kernel's G17P runtime: the HAL200 acknowledgement is optional. */
+   if (create->flags & ~DRM_ASAHI_VM_CREATE_HAL200)
+      return -EINVAL;
+
    shim_vm.kernel_start = create->kernel_start;
    shim_vm.kernel_end = create->kernel_end;
    shim_vm.valid = true;
@@ -1194,9 +1198,11 @@ asahi_log_submit(const struct drm_asahi_submit *submit)
        * records it actually contains is indistinguishable from a correct one
        * until the hardware reads the gap. */
       if (header.cmd_type == DRM_ASAHI_CMD_COMPUTE &&
-          header.size >= sizeof(struct drm_asahi_cmd_compute)) {
-         struct drm_asahi_cmd_compute compute;
-         memcpy(&compute, cmdbuf + offset + sizeof(header), sizeof(compute));
+          header.size >= offsetof(struct drm_asahi_cmd_compute,
+                                  ts_end_copies)) {
+         struct drm_asahi_cmd_compute compute = {0};
+         memcpy(&compute, cmdbuf + offset + sizeof(header),
+                MIN2(sizeof(compute), header.size));
          fprintf(log, " cdm_base=0x%llx cdm_end=0x%llx cdm_len=%llu",
                  (unsigned long long)compute.cdm_ctrl_stream_base,
                  (unsigned long long)compute.cdm_ctrl_stream_end,

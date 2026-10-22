@@ -94,13 +94,14 @@ hk_drm_submit_command_limit(bool batch_enabled, uint32_t kernel_limit)
 uint16_t
 hk_drm_render_command_size(bool g17p, bool exact_prior)
 {
+   /* The zero timestamp copies precede prior_vdm/prior_cdm. */
    if (exact_prior)
-      return sizeof(struct drm_asahi_cmd_render_with_prior);
+      return offsetof(struct drm_asahi_cmd_render, ray_query);
 
    /* Legacy kernels consume only the fields they know, without skipping an
     * appended tail. Even zero G17P resource-specifier high words would then
     * be parsed as another command. Keep their original packet boundary. */
-   return g17p ? sizeof(struct drm_asahi_cmd_render)
+   return g17p ? offsetof(struct drm_asahi_cmd_render, ts_frag_end_copies)
                : offsetof(struct drm_asahi_cmd_render, bg_eot_rsrc_spec_hi);
 }
 

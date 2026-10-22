@@ -1106,6 +1106,9 @@ agx_open_device(void *memctx, struct agx_device *dev)
    struct drm_asahi_vm_create vm_create = {
       .kernel_start = dev->params.vm_end - kernel_size,
       .kernel_end = dev->params.vm_end,
+      .flags = dev->params.gpu_hal_generation == DRM_ASAHI_GPU_HAL_200
+                  ? DRM_ASAHI_VM_CREATE_HAL200
+                  : 0,
    };
 
    /* G17P is bounded by the narrower of the compact VDM aperture and the

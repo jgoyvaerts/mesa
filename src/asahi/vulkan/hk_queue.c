@@ -1148,14 +1148,11 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
    if (flush_sstt) {
       assert(queue->g17p_sstt_flush_bo);
       struct drm_asahi_cmd_header header = agx_cmd_header(true, 0, 0);
-      const struct drm_asahi_cmd_compute_with_prior cmd = {
-         .legacy = {
-            .cdm_ctrl_stream_base = queue->g17p_sstt_flush_bo->va->addr,
-            .cdm_ctrl_stream_end =
-               queue->g17p_sstt_flush_bo->va->addr +
-               AGX3_CDM_SSTT_FLUSH_INVALIDATE_SIZE +
-               AGX3_CDM_STREAM_TERMINATE_SIZE,
-         },
+      const struct drm_asahi_cmd_compute cmd = {
+         .cdm_ctrl_stream_base = queue->g17p_sstt_flush_bo->va->addr,
+         .cdm_ctrl_stream_end = queue->g17p_sstt_flush_bo->va->addr +
+                                AGX3_CDM_SSTT_FLUSH_INVALIDATE_SIZE +
+                                AGX3_CDM_STREAM_TERMINATE_SIZE,
       };
       if (queue->sync.exact_prior)
          header.size = sizeof(cmd);
@@ -1215,8 +1212,8 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
                    cs->timestamp.end.handle || cs->timestamp.start.handle);
 
             asahi_append_compute_attachments(dev, &payload, cs);
-            struct drm_asahi_cmd_compute_with_prior cmd = {0};
-            asahi_fill_cdm_command(dev, cs, &cmd.legacy);
+            struct drm_asahi_cmd_compute cmd = {0};
+            asahi_fill_cdm_command(dev, cs, &cmd);
             if(cs->gen1_native_rq) {
                header.size=sizeof(cmd);
                cmd.scs_layout=hk_gen1_ray_query_scs_layout(dev);
@@ -1242,8 +1239,8 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
                    cs->timestamp.end.handle || cs->timestamp.start.handle);
 
             asahi_append_fragment_attachments(dev, &payload, cs);
-            struct drm_asahi_cmd_render_with_prior cmd = {0};
-            asahi_fill_vdm_command(dev, cs, &cmd.legacy);
+            struct drm_asahi_cmd_render cmd = {0};
+            asahi_fill_vdm_command(dev, cs, &cmd);
 
             /* The render's vertex half depends on no earlier render while its
              * fragment half does (hk_sync: every render dependency targets
@@ -1258,7 +1255,7 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
                 cs->sync.prior_ta[HK_SYNC_VDM] == 0 &&
                 (cs->sync.barrier[HK_SYNC_VDM] != DRM_ASAHI_BARRIER_NONE ||
                  cs->sync.prior[HK_SYNC_VDM] != 0))
-               cmd.legacy.flags |= DRM_ASAHI_RENDER_FRAGMENT_BARRIERS;
+               cmd.flags |= DRM_ASAHI_RENDER_FRAGMENT_BARRIERS;
             header.size = hk_drm_render_command_size(
                dev->dev.chip == AGX_CHIP_G17P, queue->sync.exact_prior);
             if (queue->sync.exact_prior) {
@@ -1266,12 +1263,11 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
                cmd.prior_cdm = cs->sync.prior[HK_SYNC_CDM];
             }
             if (cs->gen1_native_fragment_rq || cs->gen1_native_vertex_rq) {
-               struct drm_asahi_cmd_render_with_ray_query extended = {.legacy = cmd};
                for (unsigned stage = 0; stage < 2; ++stage) {
                   if (!(stage ? cs->gen1_native_fragment_rq
                               : cs->gen1_native_vertex_rq))
                      continue;
-                  struct drm_asahi_render_ray_query_stage *rt = &extended.ray_query[stage];
+                  struct drm_asahi_render_ray_query_stage *rt = &cmd.ray_query[stage];
                   rt->scs_layout = hk_gen1_ray_query_scs_layout(dev);
                   rt->intersection_pool = dev->gen1_rq_ift->va->addr;
                   rt->intersection_pool_bytes = 0x4000;
@@ -1280,13 +1276,10 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
                   rt->intersection_default = UINT64_C(0x10010020000);
                   rt->intersection_default_control = UINT64_C(0x16000000000);
                }
-               header.size = sizeof(extended);
-               util_dynarray_append(&payload, header);
-               util_dynarray_append_array(&payload, uint8_t, &extended, header.size);
-            } else {
-               util_dynarray_append(&payload, header);
-               util_dynarray_append_array(&payload, uint8_t, &cmd, header.size);
+               header.size = sizeof(cmd);
             }
+            util_dynarray_append(&payload, header);
+            util_dynarray_append_array(&payload, uint8_t, &cmd, header.size);
             nr_vdm++;
          }
       }

@@ -496,13 +496,21 @@ struct agx_va *agx_va_alloc(struct agx_device *dev, uint64_t size_B,
                             uint64_t fixed_va);
 void agx_va_free(struct agx_device *dev, struct agx_va *va, bool unbind);
 
+/* The render and compute command bases end where their timestamp-copy arrays
+ * begin. Everything after them is feature-gated, so a command carries it only
+ * when it uses it (prior_* and ray-query/intersection state).
+ */
+#define AGX_DRM_RENDER_BASE_SIZE                                               \
+   offsetof(struct drm_asahi_cmd_render, ts_frag_end_copies)
+#define AGX_DRM_COMPUTE_BASE_SIZE                                              \
+   offsetof(struct drm_asahi_cmd_compute, ts_end_copies)
+
 static inline struct drm_asahi_cmd_header
 agx_cmd_header(bool compute, uint16_t barrier_vdm, uint16_t barrier_cdm)
 {
    return (struct drm_asahi_cmd_header){
       .cmd_type = compute ? DRM_ASAHI_CMD_COMPUTE : DRM_ASAHI_CMD_RENDER,
-      .size = compute ? sizeof(struct drm_asahi_cmd_compute)
-                      : sizeof(struct drm_asahi_cmd_render),
+      .size = compute ? AGX_DRM_COMPUTE_BASE_SIZE : AGX_DRM_RENDER_BASE_SIZE,
       .vdm_barrier = barrier_vdm,
       .cdm_barrier = barrier_cdm,
    };
@@ -518,6 +526,6 @@ static inline uint16_t
 agx_render_command_size(const struct agx_device *dev)
 {
    return dev->chip == AGX_CHIP_G17P
-             ? sizeof(struct drm_asahi_cmd_render)
+             ? AGX_DRM_RENDER_BASE_SIZE
              : offsetof(struct drm_asahi_cmd_render, bg_eot_rsrc_spec_hi);
 }

@@ -17,16 +17,17 @@ hk_drm_rebase_prior(struct drm_asahi_cmd_header *h, void *payload,
    uint16_t barriers[2] = {h->vdm_barrier, h->cdm_barrier};
    const uint32_t before[2] = {vdm_before, cdm_before};
    uint64_t prior[2] = {0, 0};
-   struct drm_asahi_cmd_render_with_prior *r = payload;
-   struct drm_asahi_cmd_compute_with_prior *c = payload;
+   struct drm_asahi_cmd_render *r = payload;
+   struct drm_asahi_cmd_compute *c = payload;
    if (exact) {
       if (h->cmd_type == DRM_ASAHI_CMD_RENDER) {
-         if (h->size < sizeof(*r))
+         if (h->size < offsetof(struct drm_asahi_cmd_render, ray_query))
             return false;
          prior[0] = r->prior_vdm;
          prior[1] = r->prior_cdm;
       } else if (h->cmd_type == DRM_ASAHI_CMD_COMPUTE) {
-         if (h->size < sizeof(*c))
+         if (h->size < offsetof(struct drm_asahi_cmd_compute,
+                                cdm_auxiliary_allocation))
             return false;
          prior[0] = c->prior_vdm;
          prior[1] = c->prior_cdm;

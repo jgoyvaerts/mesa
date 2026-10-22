@@ -1100,7 +1100,7 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
 
          struct drm_asahi_cmd_header header = agx_cmd_header(true, 0, 0);
          util_dynarray_append(&compute_cmdbuf, header);
-         util_dynarray_append(&compute_cmdbuf, *compute);
+         util_dynarray_append_array(&compute_cmdbuf, uint8_t, compute, header.size);
 
          struct drm_asahi_submit compute_submit = {
             .flags = 0,
@@ -1161,7 +1161,7 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
       struct drm_asahi_cmd_header header = agx_cmd_header(true, 0, 0);
 
       util_dynarray_append(&cmdbuf, header);
-      util_dynarray_append(&cmdbuf, *compute);
+      util_dynarray_append_array(&cmdbuf, uint8_t, compute, header.size);
    }
 
    if (render) {

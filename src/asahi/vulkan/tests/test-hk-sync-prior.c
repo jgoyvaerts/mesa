@@ -9,28 +9,21 @@
 #include "hk_cmd_buffer.h"
 #include "hk_drm_prior_core.h"
 #include "hk_queue.h"
-_Static_assert(sizeof(struct drm_asahi_cmd_render) == 256, "legacy render");
-_Static_assert(sizeof(struct drm_asahi_cmd_compute) == 64,
-               "legacy Mesa compute");
-_Static_assert(sizeof(struct drm_asahi_cmd_render_with_prior) == 272,
-               "render wire");
-_Static_assert(offsetof(struct drm_asahi_cmd_render_with_prior, prior_vdm) ==
-                  256,
-               "render prior vdm");
-_Static_assert(offsetof(struct drm_asahi_cmd_render_with_prior, prior_cdm) ==
-                  264,
-               "render prior cdm");
-_Static_assert(sizeof(struct drm_asahi_cmd_compute_with_prior) == 88,
-               "compute wire");
-_Static_assert(offsetof(struct drm_asahi_cmd_compute_with_prior, scs_layout) ==
-                  64,
-               "kernel scs_layout gap");
-_Static_assert(offsetof(struct drm_asahi_cmd_compute_with_prior, prior_vdm) ==
-                  72,
-               "compute prior vdm");
-_Static_assert(offsetof(struct drm_asahi_cmd_compute_with_prior, prior_cdm) ==
-                  80,
-               "compute prior cdm");
+/* Layout of the asahi UAPI of aurora's Linux 7.3: the G17P fields follow the
+ * 64-byte timestamp-copy arrays. */
+#define ASSERT_AT(type, field, offset)                                         \
+   _Static_assert(offsetof(struct type, field) == offset, #type "." #field)
+ASSERT_AT(drm_asahi_cmd_render, ts_frag_end_copies, 256);
+ASSERT_AT(drm_asahi_cmd_render, prior_vdm, 320);
+ASSERT_AT(drm_asahi_cmd_render, prior_cdm, 328);
+ASSERT_AT(drm_asahi_cmd_render, ray_query, 336);
+_Static_assert(sizeof(struct drm_asahi_cmd_render) == 448, "render");
+ASSERT_AT(drm_asahi_cmd_compute, ts_end_copies, 64);
+ASSERT_AT(drm_asahi_cmd_compute, scs_layout, 128);
+ASSERT_AT(drm_asahi_cmd_compute, prior_vdm, 136);
+ASSERT_AT(drm_asahi_cmd_compute, prior_cdm, 144);
+ASSERT_AT(drm_asahi_cmd_compute, cdm_auxiliary_allocation, 152);
+_Static_assert(sizeof(struct drm_asahi_cmd_compute) == 200, "compute");
 static unsigned tests, failures;
 static void *test_context;
 
@@ -432,9 +425,10 @@ main(void)
    T("ordinal overflow rejected", !submit(q, a));
    T("overflow no counter/stream mutation",
      q->sync.submitted[1] == UINT64_MAX && d->sync.index == 73);
-   struct drm_asahi_cmd_render_with_prior r = {0};
+   struct drm_asahi_cmd_render r = {0};
    struct drm_asahi_cmd_header h = {.cmd_type = DRM_ASAHI_CMD_RENDER,
-                                    .size = sizeof(r),
+                                    .size = offsetof(struct drm_asahi_cmd_render,
+                                                     ray_query),
                                     .vdm_barrier = 2,
                                     .cdm_barrier = 5};
    uint64_t base[] = {10, 20};
@@ -446,7 +440,7 @@ main(void)
    h.cdm_barrier = DRM_ASAHI_BARRIER_NONE;
    T("deliberate zero rebase", hk_drm_rebase_prior(&h, &r, 7, 8, base, true));
    T("deliberate zero preserved", h.vdm_barrier == 0 && r.prior_vdm == 12);
-   struct drm_asahi_cmd_compute_with_prior co = {0};
+   struct drm_asahi_cmd_compute co = {0};
    h = (struct drm_asahi_cmd_header){.cmd_type = DRM_ASAHI_CMD_COMPUTE,
                                      .size = sizeof(co),
                                      .vdm_barrier = DRM_ASAHI_BARRIER_NONE,
@@ -509,20 +503,6 @@ main(void)
    T("relative overflow rejected", !submit(q, a));
    T("relative overflow untouched",
      q->sync.submitted[1] == 0 && d->sync.index == 91);
-   /* Legacy packet prefixes retain all original bytes, extensions are omitted.
-    */
-   struct drm_asahi_cmd_render lr;
-   memset(&lr, 0xa5, sizeof(lr));
-   struct drm_asahi_cmd_render_with_prior er = {.legacy = lr,
-                                                .prior_vdm = 17,
-                                                .prior_cdm = 29};
-   T("legacy render bytes", memcmp(&lr, &er, sizeof(lr)) == 0);
-   struct drm_asahi_cmd_compute lc;
-   memset(&lc, 0x5a, sizeof(lc));
-   struct drm_asahi_cmd_compute_with_prior ec = {.legacy = lc,
-                                                 .prior_vdm = 17,
-                                                 .prior_cdm = 29};
-   T("legacy compute bytes", memcmp(&lc, &ec, sizeof(lc)) == 0);
    printf("RESULT checks=%u failures=%u\n", tests, failures);
    ralloc_free(test_context);
    return failures ? EXIT_FAILURE : EXIT_SUCCESS;
