@@ -16,6 +16,7 @@
 #include "drm-uapi/asahi_drm.h"
 #include "util/bitscan.h"
 #include "util/macros.h"
+#include "util/os_misc.h"
 #include "util/ralloc.h"
 #include "util/timespec.h"
 #include "util/u_debug.h"
@@ -883,6 +884,14 @@ agx_open_device(void *memctx, struct agx_device *dev)
    }
 
    dev->chip = agx_chip_from_params(&dev->params);
+
+   /* The M4 Pro's 25G83 GPU firmware asserts ("PBState must be unbind") when
+    * a process uses a second render queue, and compressed render targets
+    * failed the compositor's renders under load. Use one queue and no
+    * compression there unless ASAHI_MESA_DEBUG chooses otherwise.
+    */
+   if (dev->params.chip_id == 0x6040 && !os_get_option("ASAHI_MESA_DEBUG"))
+      dev->debug |= AGX_DBG_1QUEUE | AGX_DBG_NOCOMPRESS;
 
    /*
     * Recognition, shader codegen, descriptors and the command stream are
