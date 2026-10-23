@@ -161,7 +161,7 @@ agx_fence_create(struct agx_context *ctx)
          if (pending >= 0) {
             close(fd);
             fd = pending;
-         } else if (sync_wait(ctx->in_sync_fd, -1)) {
+         } else if (agx_fallback_wait(ctx->in_sync_fd, "fence dup failed")) {
             close(fd);
             fd = -1;
          }
@@ -170,7 +170,8 @@ agx_fence_create(struct agx_context *ctx)
          if (merged >= 0) {
             close(fd);
             fd = merged;
-         } else if (sync_wait(fd, -1) || sync_wait(ctx->in_sync_fd, -1)) {
+         } else if (agx_fallback_wait(fd, "fence merge failed") ||
+                    agx_fallback_wait(ctx->in_sync_fd, "fence merge failed")) {
             close(fd);
             fd = -1;
          }
@@ -222,7 +223,7 @@ agx_fence_server_sync(struct pipe_context *pctx, struct pipe_fence_handle *f,
       /* Keep the previous accumulated fence and consume this dependency on
        * the CPU if the kernel cannot allocate a merged sync file. Dropping it
        * would let the next GPU submission run before the acquire fence. */
-      if (sync_wait(fd, -1)) {
+      if (agx_fallback_wait(fd, "fence accumulation failed")) {
          agx_msg("server-wait fence accumulation and fallback wait failed\n");
          const bool first_fault = !ctx->any_faults;
          ctx->any_faults = true;

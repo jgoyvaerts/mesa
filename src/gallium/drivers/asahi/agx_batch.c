@@ -724,7 +724,7 @@ agx_get_in_sync(struct agx_context *ctx, uint32_t *syncobj)
       /* A native-fence import can fail under transient kernel allocation
        * pressure. Waiting on the original sync file preserves the acquire
        * ordering without losing the submission or poisoning the context. */
-      if (ret && sync_wait(ctx->in_sync_fd, -1)) {
+      if (ret && agx_fallback_wait(ctx->in_sync_fd, "acquire import failed")) {
          agx_msg("native acquire fence import and fallback wait failed\n");
          close(ctx->in_sync_fd);
          ctx->in_sync_fd = -1;
@@ -1039,7 +1039,7 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
           * if we already have the sync file, waiting it avoids cache-domain
           * transitions. */
          if (in_sync_fd < 0 ? !agx_wait_shared_bo(bo)
-                            : (ret && sync_wait(in_sync_fd, -1))) {
+                            : (ret && agx_fallback_wait(in_sync_fd, "shared BO import failed"))) {
             const int sync_errno = errno ? errno : EIO;
             if (in_sync_fd >= 0)
                close(in_sync_fd);

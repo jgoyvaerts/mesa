@@ -45,6 +45,11 @@
 #define agx_msg(...) fprintf(stderr, __VA_ARGS__)
 #endif
 
+/* The CPU-wait fallbacks for failed fence imports and merges block without a
+ * timeout: log each one so a stalled process shows where it is waiting.
+ */
+#define agx_fallback_wait(fd, why)                                                (agx_msg("CPU wait on a fence: %s\n", why), sync_wait(fd, -1))
+
 #define AGX_NUM_TEXTURE_STATE_REGS 16
 
 struct agx_streamout_target {
