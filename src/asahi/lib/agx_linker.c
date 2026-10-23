@@ -190,9 +190,10 @@ agx3_container_size(size_t code_size)
  * tables. Identical in both captured Apple code images, so it is a fixed
  * prologue rather than anything workload-specific. */
 void
-agx3_build_container_lead(uint8_t *image, enum agx_chip chip)
+agx3_build_container_lead(uint8_t *image, enum agx_chip chip,
+                          unsigned cores_per_cluster)
 {
-   const unsigned slots = agx_chip_usc_helper_table_slots(chip);
+   const unsigned slots = agx_chip_usc_helper_table_slots(chip, cores_per_cluster);
 
    memset(image, 0, AGX3_CONTAINER_LEAD);
    agx_store_le32(image, AGX3_CONTAINER_LEAD);
@@ -212,26 +213,28 @@ agx3_build_container_lead(uint8_t *image, enum agx_chip chip)
  * the page.  Only the base page gets this; per-shader containers keep the
  * plain lead. */
 void
-agx3_build_usc_base_page(uint8_t *image, size_t size, enum agx_chip chip)
+agx3_build_usc_base_page(uint8_t *image, size_t size, enum agx_chip chip,
+                         unsigned cores_per_cluster)
 {
    assert(size >= AGX3_CONTAINER_LEAD + 0x10);
 
    memset(image, 0, size);
-   agx3_build_container_lead(image, chip);
+   agx3_build_container_lead(image, chip, cores_per_cluster);
 
    if (agx_chip_usc_base_page_fill_returns(chip)) {
-      assert(agx_chip_usc_helper_table_slots(chip) == 10);
+      assert(agx_chip_usc_helper_table_slots(chip, cores_per_cluster) == 10);
       agx3_fill_helper_terminals(image, 0x2c0, AGX3_CONTAINER_LEAD);
       agx3_fill_helper_terminals(image, AGX3_CONTAINER_LEAD + 0x10, size);
    }
 }
 
 static void
-agx3_build_container(uint8_t *image, enum agx_chip chip, size_t code_size,
+agx3_build_container(uint8_t *image, enum agx_chip chip,
+                     unsigned cores_per_cluster, size_t code_size,
                      bool fragment, bool sampled_fragment)
 {
    memset(image, 0, agx3_container_size(code_size));
-   agx3_build_container_lead(image, chip);
+   agx3_build_container_lead(image, chip, cores_per_cluster);
 
    agx_store_le32(image + AGX3_CONTAINER_LEAD,
                  AGX3_CONTAINER_BLOCK_HDR + AGX3_CONTAINER_CONST_PROG +
@@ -416,7 +419,8 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
    }
 
    if (container)
-      agx3_build_container(container_map, dev->chip, size, fragment,
+      agx3_build_container(container_map, dev->chip,
+                           dev->params.num_cores_per_cluster, size, fragment,
                            fragment && sampled_fragment);
 
    size_t offset = 0;

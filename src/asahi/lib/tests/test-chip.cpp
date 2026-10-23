@@ -61,7 +61,7 @@ TEST(AGXChip, G16GUsesSharedNativePathWithItsOwnCapabilities)
    EXPECT_EQ(agx_chip_sampler_generation(AGX_CHIP_G16G),
              AGX_SAMPLER_GENERATION_GEN4_HAL200);
    EXPECT_EQ(agx_chip_sampler_heap_element_size(AGX_CHIP_G16G), 32u);
-   EXPECT_EQ(agx_chip_usc_helper_table_slots(AGX_CHIP_G16G), 10u);
+   EXPECT_EQ(agx_chip_usc_helper_table_slots(AGX_CHIP_G16G, 0), 10u);
    EXPECT_TRUE(agx_chip_native_indirect_compute(AGX_CHIP_G16G));
    EXPECT_TRUE(agx_chip_native_imageblock(AGX_CHIP_G16G));
    EXPECT_TRUE(agx_chip_explicit_robust_image_bounds(AGX_CHIP_G16G));

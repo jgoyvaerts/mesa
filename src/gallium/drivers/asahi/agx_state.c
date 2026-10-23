@@ -4710,7 +4710,8 @@ agx_g17p_append_compute(struct agx_batch *batch,
       if (!shader.cpu || !shader_bo)
          return agx_g17p_compute_failed("shader allocation");
 
-      agx3_build_container_lead(shader.cpu, dev->chip);
+      agx3_build_container_lead(shader.cpu, dev->chip,
+                                dev->params.num_cores_per_cluster);
       const uint8_t *bytes = binary;
       if (!agx3_build_code_block(
              (uint8_t *)shader.cpu + AGX3_CONTAINER_LEAD_SIZE, block_size,

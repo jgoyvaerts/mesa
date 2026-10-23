@@ -38,7 +38,7 @@ check_native_g15(enum agx_chip chip)
    assert(agx_chip_native_imageblock(chip));
    assert(agx_chip_native_indirect_compute(chip));
    assert(agx_chip_driver_supported(chip));
-   assert(agx_chip_usc_helper_table_slots(chip) == 10);
+   assert(agx_chip_usc_helper_table_slots(chip, 0) == 10);
 }
 
 int
@@ -114,6 +114,12 @@ main(void)
    bad = t6040;
    bad.gpu_hal_generation = DRM_ASAHI_GPU_HAL_LEGACY;
    assert(agx_chip_from_params(&bad) == AGX_CHIP_G16S);
+
+   /* G17P helper tables have a slot per core of a cluster, never fewer than
+    * the A18 Pro's six: six there, ten on the M4 Pro. */
+   assert(agx_chip_usc_helper_table_slots(AGX_CHIP_G17P, 0) == 6);
+   assert(agx_chip_usc_helper_table_slots(AGX_CHIP_G17P, 6) == 6);
+   assert(agx_chip_usc_helper_table_slots(AGX_CHIP_G17P, 10) == 10);
 
    printf("chip admission: ok\n");
    return 0;

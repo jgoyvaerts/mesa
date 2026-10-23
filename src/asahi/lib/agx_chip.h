@@ -378,13 +378,19 @@ agx_chip_elide_app_dispatch_barrier(enum agx_chip chip)
    return agx_chip_native_g15(chip);
 }
 
-/* Number of helper-table slots in the USC code-container lead block.  G17P
- * has six; G15 and G16 parts have ten, and with six their fragment programs
- * of 256x256 and larger walk past the lead into the guard page. */
+/* Number of helper-table slots in the USC code-container lead block.  G15
+ * and G16 parts have ten; with six their fragment programs of 256x256 and
+ * larger walk past the lead into the guard page.  On G17P the state loader's
+ * profile prefix calls the slot at 0x100 + 16 * core id (id = 16 * cluster +
+ * core), so each table needs a slot per core of its cluster: six on the A18
+ * Pro, ten on the M4 Pro, whose cluster 1 cores 8 and 9 otherwise run past
+ * the table and never draw their tiles. */
 static inline unsigned
-agx_chip_usc_helper_table_slots(enum agx_chip chip)
+agx_chip_usc_helper_table_slots(enum agx_chip chip, unsigned cores_per_cluster)
 {
-   return chip == AGX_CHIP_G17P ? 6 : 10;
+   if (chip != AGX_CHIP_G17P)
+      return 10;
+   return cores_per_cluster > 6 ? cores_per_cluster : 6;
 }
 
 /* Whether the USC window base page needs a return in every slot past its

@@ -30,8 +30,8 @@ main(void)
    for (unsigned c = 0; c < sizeof(plain) / sizeof(plain[0]); ++c) {
       memset(page, 0xa5, sizeof(page));
       memset(lead, 0, sizeof(lead));
-      agx3_build_container_lead(lead, plain[c]);
-      agx3_build_usc_base_page(page, PAGE, plain[c]);
+      agx3_build_container_lead(lead, plain[c], 0);
+      agx3_build_usc_base_page(page, PAGE, plain[c], 0);
       assert(memcmp(page, lead, PAGE) == 0);
    }
 
@@ -40,8 +40,8 @@ main(void)
     * +0x340. */
    memset(page, 0xa5, sizeof(page));
    memset(lead, 0, sizeof(lead));
-   agx3_build_container_lead(lead, AGX_CHIP_G15C);
-   agx3_build_usc_base_page(page, PAGE, AGX_CHIP_G15C);
+   agx3_build_container_lead(lead, AGX_CHIP_G15C, 0);
+   agx3_build_usc_base_page(page, PAGE, AGX_CHIP_G15C, 0);
    memcpy(terminal, lead + 0x200 + 10 * 16, sizeof(terminal));
 
    assert(memcmp(page, lead, 0x2c0) == 0);

@@ -108,7 +108,8 @@ agx_g17p_upload_bg_eot(struct agx_bg_eot_cache *cache,
    if (!image)
       return false;
 
-   agx3_build_container_lead(image, cache->dev->chip);
+   agx3_build_container_lead(image, cache->dev->chip,
+                             cache->dev->params.num_cores_per_cluster);
    const uint8_t *text = bin->binary;
    const bool built = agx3_build_code_block(
       image + lead_size, block_size, text + main_offset, bin->info.main_size,
@@ -693,7 +694,8 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
          ralloc_free(p);
          return NULL;
       }
-      agx3_build_container_lead(image, cache->dev->chip);
+      agx3_build_container_lead(image, cache->dev->chip,
+                             cache->dev->params.num_cores_per_cluster);
       const bool built = agx3_build_code_block(
          image + lead_size, block_size,
          (const uint8_t *)binary + info->main_offset, info->main_size,

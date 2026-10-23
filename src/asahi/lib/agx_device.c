@@ -1398,7 +1398,8 @@ agx_open_device(void *memctx, struct agx_device *dev)
          goto fail;
       }
 
-      agx3_build_usc_base_page(map, usc_base_size, dev->chip);
+      agx3_build_usc_base_page(map, usc_base_size, dev->chip,
+                               dev->params.num_cores_per_cluster);
       agx_bo_assert_range(usc_base, 0, usc_base_size);
 
    }
