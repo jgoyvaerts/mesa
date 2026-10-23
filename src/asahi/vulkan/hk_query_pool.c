@@ -851,8 +851,11 @@ hk_oq_submission_done(struct hk_device *dev, struct hk_query_pool *pool,
    for (;;) {
       int64_t timeout = wait ? (int64_t)os_time_get_absolute_timeout(100000000)
                              : 0;
+      /* WAIT_FOR_SUBMIT: the point is noted just before the submit ioctl. */
       int ret = drmSyncobjTimelineWait(dev->dev.fd, &syncobj, &point, 1,
-                                       timeout, 0, NULL);
+                                       timeout,
+                                       DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT,
+                                       NULL);
       if (ret == 0) {
          *known = (struct hk_oq_submit){.syncobj = syncobj, .point = point};
          return VK_SUCCESS;
