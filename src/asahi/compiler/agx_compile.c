@@ -7341,16 +7341,9 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
    /*
     * Rewrites a uniform-address atomic into "one lane of the subgroup performs
     * the whole operation", which needs ACTIVE_THREAD_INDEX_IN_SUBGROUP and
-    * TOTAL_ACTIVE_THREADS_IN_SUBGROUP. Their AGX3 numbers (SR 34/36) are now
-    * witnessed and grounded in agx3_map_sr(), but the optimized form is kept
-    * off on AGX3 until a CTS campaign validates it; before the witness every
-    * shader containing a uniform-address atomic failed to compile.
-    *
-    * Skipping the optimization keeps atomics CORRECT -- each lane performs its
-    * own atomic, which is what the unoptimized program means -- at the cost of
-    * one atomic per lane instead of one per subgroup on uniform addresses.
-    * Re-enable once those two SR numbers are witnessed rather than guessed; a
-    * wrong SR number would silently elect the wrong lane.
+    * TOTAL_ACTIVE_THREADS_IN_SUBGROUP. On AGX3 the caller enables it only in
+    * the stages where the packer admits those (SR 34/36). Skipping it keeps
+    * atomics correct, at one atomic per lane instead of one per subgroup.
     */
    NIR_PASS(_, nir, agx_nir_lower_atomics, byte_indices);
 
@@ -11816,7 +11809,17 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
          NIR_PASS(_, nir, agx_nir_lower_imul64);
    }
 
-   const bool uniform_atomics = !is_agx3;
+   /* The AGX3 packer admits SR 34/36 only on AGX3B and in these stages
+    * (agx3_pack_binary.c, GET_SR_COVERAGE); a geometry or tessellation
+    * evaluation shader with a uniform-address atomic would fail to compile.
+    */
+   const mesa_shader_stage stage = nir->info.stage;
+   const bool uniform_atomics =
+      !is_agx3 ||
+      (is_g17p && (stage == MESA_SHADER_COMPUTE ||
+                   stage == MESA_SHADER_VERTEX ||
+                   stage == MESA_SHADER_TESS_CTRL ||
+                   stage == MESA_SHADER_FRAGMENT));
 
    /* Apple's G17P loops are a
     * guard plus a bottom-tested body (fs/cs-apple.bin: the backedge target
