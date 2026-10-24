@@ -1716,8 +1716,16 @@ agx_nir_lower_stats_fs(nir_shader *s)
    nir_def *samples = nir_bit_count(b, nir_load_sample_mask_in(b));
    unsigned query = PIPE_STAT_QUERY_PS_INVOCATIONS;
 
+   /* One atomic per fragment on a single counter serializes the whole
+    * fragment pipeline on that address (a full-screen pass at 3456x2234 drops
+    * to ~1.3 Gpix/s). Sum the SIMD group's non-helper lanes first and let one
+    * of them add the total: same count, up to 32x fewer atomics.
+    */
+   nir_def *total = nir_reduce(b, samples, .reduction_op = nir_op_iadd);
+   nir_push_if(b, nir_ieq_imm(b, nir_load_active_subgroup_invocation_agx(b, 16), 0));
    nir_def *addr = nir_load_stat_query_address_poly(b, .base = query);
-   nir_global_atomic(b, 32, addr, samples, .atomic_op = nir_atomic_op_iadd);
+   nir_global_atomic(b, 32, addr, total, .atomic_op = nir_atomic_op_iadd);
+   nir_pop_if(b, NULL);
 
    nir_pop_if(b, NULL);
    return nir_progress(true, b->impl, nir_metadata_control_flow);
