@@ -9207,16 +9207,19 @@ static bool
 agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
                          struct agx_shader_key *key,
                          struct util_dynarray *binary,
-                         struct agx_shader_info *out, unsigned *offset_out)
+                         struct agx_shader_info *out, unsigned *offset_out,
+                         unsigned ra_budget_cut)
 {
    const unsigned initial_binary_size = binary->size;
+   const struct agx_shader_info initial_out = *out;
+   /* A retry reuses the NIR these passes already rewrote. */
    if (key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-       !impl->function->is_preamble)
+       !impl->function->is_preamble && !ra_budget_cut)
       NIR_PASS(_, nir, agx_nir_fragment_output_temporaries);
 
    if (key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
        nir->info.stage == MESA_SHADER_VERTEX && !impl->function->is_preamble &&
-       exec_list_length(&impl->body) > 1)
+       exec_list_length(&impl->body) > 1 && !ra_budget_cut)
       NIR_PASS(_, nir, nir_move_output_stores_to_end);
 
    nir_index_blocks(impl);
@@ -9224,6 +9227,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
 
    agx_context *ctx = rzalloc(NULL, agx_context);
    ctx->nir = nir;
+   ctx->ra_budget_cut = ra_budget_cut;
    ctx->is_preamble = impl->function->is_preamble;
    if (ctx->is_preamble)
       out->agx3_preamble_static_spill_version = 0;
@@ -9447,6 +9451,17 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    const bool imports_only_before_ra = agx3_cprog_spill_provenance(ctx);
    AGX_PASS(ctx, agx_ra);
    if (ctx->ra_failed) {
+      /* Spilling only targets total demand; pinned values can still leave the
+       * shuffle no room. Recompile with an ever smaller spill budget. */
+      if (key->has_scratch && !key->is_helper && ra_budget_cut < 64) {
+         ralloc_free(ctx);
+         binary->size = initial_binary_size;
+         /* Constant promotion and others accumulate into out. */
+         *out = initial_out;
+         return agx_compile_function_nir(nir, impl, key, binary, out,
+                                         offset_out,
+                                         ra_budget_cut ? ra_budget_cut * 2 : 16);
+      }
       agx_set_refusal(ctx, "register allocation found no legal placement",
                       __LINE__);
       ralloc_free(ctx);
@@ -11940,7 +11955,7 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
    nir_foreach_function_with_impl(func, impl, nir) {
       unsigned offset;
       if (!agx_compile_function_nir(nir, impl, key, &binary, &out->info,
-                                    &offset)) {
+                                    &offset, 0)) {
          util_dynarray_fini(&binary);
          memset(out, 0, sizeof(*out));
          return false;
