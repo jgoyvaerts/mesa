@@ -4028,6 +4028,32 @@ hk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
                                    render->g17p_zls_touched &
                                    ~render->g17p_zls_written);
 
+   /* A memoryless (transient) attachment cannot be spilled by a partial
+    * render, so a pass that uses one must answer a tiler parameter-buffer
+    * overflow with firmware-requested growth instead. Mark every tiling
+    * stream of the pass so the kernel sets DRM_ASAHI_RENDER_MEMORYLESS. */
+   bool memoryless = false;
+   for (uint32_t i = 0; i < render->color_att_count; i++) {
+      const struct hk_image_view *v = render->color_att[i].iview;
+      if (v && (v->vk.usage & VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT))
+         memoryless = true;
+   }
+   if (render->depth_att.iview &&
+       (render->depth_att.iview->vk.usage & VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT))
+      memoryless = true;
+   if (render->stencil_att.iview &&
+       (render->stencil_att.iview->vk.usage & VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT))
+      memoryless = true;
+   if (memoryless && render->zls_first_cs) {
+      bool found = false;
+      list_for_each_entry(struct hk_cs, pcs, &cmd->control_streams, node) {
+         if (pcs == render->zls_first_cs)
+            found = true;
+         if (found && pcs->type == HK_CS_VDM)
+            pcs->g17p_memoryless = true;
+      }
+   }
+
    perf_debug(cmd, "End rendering");
    hk_cmd_buffer_end_graphics(cmd);
 

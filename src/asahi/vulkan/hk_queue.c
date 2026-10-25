@@ -235,6 +235,12 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
       c->flags |= DRM_ASAHI_RENDER_FEW_PRIMITIVES;
    }
 
+   /* A pass with a memoryless attachment opts into firmware parameter-buffer
+    * growth; ordinary passes rely on pre-sizing and partial renders. */
+   if (agx_native_graphics(&dev->dev) && cs->g17p_memoryless) {
+      c->flags |= DRM_ASAHI_RENDER_MEMORYLESS;
+   }
+
    if ((dev->dev.debug & AGX_DBG_NOCLUSTER) &&
        dev->dev.chip != AGX_CHIP_G17P) {
       c->flags |= DRM_ASAHI_RENDER_NO_VERTEX_CLUSTERING;

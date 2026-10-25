@@ -1032,6 +1032,22 @@ enum drm_asahi_render_flags {
 	 * may depend on it. Requires DRM_ASAHI_FEATURE_FRAGMENT_BARRIERS.
 	 */
 	DRM_ASAHI_RENDER_FRAGMENT_BARRIERS = (1U << 20),
+
+	/**
+	 * @DRM_ASAHI_RENDER_MEMORYLESS: The render pass has a memoryless
+	 * (transient, no backing store) attachment.
+	 *
+	 * Such an attachment cannot be partially stored and reloaded, so a pass
+	 * that overflows its tiler parameter buffer must grow the buffer rather
+	 * than split into partial renders. Set this flag to opt the pass into
+	 * firmware-requested parameter-buffer growth; passes without it rely on
+	 * the pre-sized buffer and partial renders, and never ask the firmware to
+	 * grow (which avoids the growth round trips that stall some firmware).
+	 * Setting the flag for a pass with no memoryless attachment is only
+	 * wasteful; omitting it for one risks a parameter-buffer exhaustion the
+	 * firmware cannot resolve by splitting.
+	 */
+	DRM_ASAHI_RENDER_MEMORYLESS = (1U << 21),
 };
 
 /**

@@ -920,6 +920,11 @@ struct hk_cs {
     * pass, not a part split off or continued. */
    bool g17p_pass_begins, g17p_pass_ends;
 
+   /* The render pass has a memoryless (transient) attachment, so an overflow
+    * of the tiler parameter buffer must be answered by firmware-requested
+    * growth rather than a partial render. Sets DRM_ASAHI_RENDER_MEMORYLESS. */
+   bool g17p_memoryless;
+
    /* Consecutive GPU query resets share one strong flush, at the first
     * consumer or the end of the stream. G13 never sets this. */
    bool query_reset_pending;
