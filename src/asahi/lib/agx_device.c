@@ -894,17 +894,15 @@ agx_open_device(void *memctx, struct agx_device *dev)
 
    dev->chip = agx_chip_from_params(&dev->params);
 
-   /* The M4 Pro still forces one queue: its 25G83 firmware asserts "PBState
-    * must be unbind" on a second render queue until a kernel fix lands. No
-    * compression used to be forced too (it once failed the compositor's
-    * renders on an older kernel), but a full desktop session on the 7.3
-    * kernel ran compressed with no fault and ~26% faster, so that is dropped.
-    * ASAHI_T6040_DEFAULTS=0 turns the single-queue default off too (for the
-    * eventual queue fix). Other debug flags add to it.
-    */
-   if (dev->params.chip_id == 0x6040 &&
-       debug_get_bool_option("ASAHI_T6040_DEFAULTS", true))
-      dev->debug |= AGX_DBG_1QUEUE;
+   /* The M4 Pro once forced one queue (its 25G83 firmware asserted "PBState
+    * must be unbind" on a second render queue) and no compression (it failed
+    * the compositor's renders on an older kernel). Both are gone on the 7.3
+    * kernel: compression runs clean and ~26% faster, and the single-queue
+    * assert no longer reproduces -- the kernel binds each parameter buffer
+    * with a fresh allocation token, so the firmware silently rebinds a reused
+    * slot instead of asserting (verified with two concurrent render queues in
+    * one context rebinding a slot token 0x4->0x6 with no fault). So no T6040
+    * default is forced any more; ASAHI_MESA_DEBUG still works for debugging. */
 
    /*
     * Recognition, shader codegen, descriptors and the command stream are
