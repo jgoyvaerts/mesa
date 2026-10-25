@@ -894,16 +894,17 @@ agx_open_device(void *memctx, struct agx_device *dev)
 
    dev->chip = agx_chip_from_params(&dev->params);
 
-   /* The M4 Pro keeps the conservative settings its desktop has run with:
-    * one queue (its 25G83 firmware asserted "PBState must be unbind" on a
-    * second render queue until a kernel fix) and no compression (it once
-    * failed the compositor's renders on an older kernel). Neither is known
-    * to be needed any more; until a desktop session confirms that,
-    * ASAHI_T6040_DEFAULTS=0 turns both off. Other debug flags add to them.
+   /* The M4 Pro still forces one queue: its 25G83 firmware asserts "PBState
+    * must be unbind" on a second render queue until a kernel fix lands. No
+    * compression used to be forced too (it once failed the compositor's
+    * renders on an older kernel), but a full desktop session on the 7.3
+    * kernel ran compressed with no fault and ~26% faster, so that is dropped.
+    * ASAHI_T6040_DEFAULTS=0 turns the single-queue default off too (for the
+    * eventual queue fix). Other debug flags add to it.
     */
    if (dev->params.chip_id == 0x6040 &&
        debug_get_bool_option("ASAHI_T6040_DEFAULTS", true))
-      dev->debug |= AGX_DBG_1QUEUE | AGX_DBG_NOCOMPRESS;
+      dev->debug |= AGX_DBG_1QUEUE;
 
    /*
     * Recognition, shader codegen, descriptors and the command stream are
