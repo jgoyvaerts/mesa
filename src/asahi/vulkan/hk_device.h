@@ -256,6 +256,20 @@ struct hk_device {
       struct list_head slabs;
    } vdm;
 
+   /* Binary semaphores whose pending signal is a submission on one of this
+    * device's queues, with the hardware ordinals that submission ended at.
+    * A later wait on the same queue orders after those commands in firmware
+    * instead of making the kernel wait for the signal fence (hk_queue.c). */
+   struct {
+      simple_mtx_t lock;
+      struct hk_queue_signal {
+         const struct vk_sync *sync;
+         const struct hk_queue *queue;
+         uint64_t ordinal[HK_SYNC_NUM_SQ];
+      } entries[32];
+      unsigned next;
+   } queue_signals;
+
    /* Native G17P indirect compute grid helper.  A compact indirect helper
     * record carries no dimensions and no resource table, so the only way a
     * runtime grid can reach the main record is for this program to publish

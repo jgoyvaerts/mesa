@@ -49,6 +49,9 @@
 #include "hk_private.h"
 #include "layout.h"
 #include "vk_drm_syncobj.h"
+#include "hk_entrypoints.h"
+#include "vk_common_entrypoints.h"
+#include "vk_semaphore.h"
 #include "vk_sync.h"
 
 /* Signal scope includes all earlier commands on this Vulkan queue. A DRM
@@ -1064,6 +1067,123 @@ hk_queue_ensure_drm(struct hk_device *dev, struct hk_queue *queue)
                     strerror(error));
 }
 
+/*
+ * Binary semaphore signals of this device's queues (hk_device::queue_signals).
+ * A wait on a binary semaphore whose pending signal came from an earlier
+ * submission on the same queue needs exactly that submission's commands (and,
+ * through queue order and their own waits, everything before them) to
+ * complete. Expressed as exact prior ordinals, the firmware orders the wait
+ * itself; as a kernel input fence, the queue must drain and the CPU must see
+ * the fence signal before the next command is even published.
+ *
+ * Only payloads nothing outside this driver can change qualify: binary,
+ * not exportable (VK_SYNC_IS_SHAREABLE), and permanent (a temporary import
+ * is a different vk_sync). A permanent import or the semaphore's destruction
+ * forgets it (hk_ImportSemaphoreFdKHR, hk_DestroySemaphore).
+ */
+static struct hk_queue_signal *
+hk_queue_signal_find(struct hk_device *dev, const struct vk_sync *sync)
+{
+   for (unsigned i = 0; i < ARRAY_SIZE(dev->queue_signals.entries); ++i) {
+      if (dev->queue_signals.entries[i].sync == sync)
+         return &dev->queue_signals.entries[i];
+   }
+   return NULL;
+}
+
+static void
+hk_queue_forget_signal(struct hk_device *dev, const struct vk_sync *sync)
+{
+   simple_mtx_lock(&dev->queue_signals.lock);
+   struct hk_queue_signal *e = hk_queue_signal_find(dev, sync);
+   if (e)
+      *e = (struct hk_queue_signal){0};
+   simple_mtx_unlock(&dev->queue_signals.lock);
+}
+
+/* The wait consumes the signal. Returns whether queue order covers it, after
+ * raising prior[] to the signalling submission's ordinals. */
+static bool
+hk_queue_take_signal(struct hk_device *dev, struct hk_queue *queue,
+                     const struct vk_sync *sync,
+                     uint64_t prior[HK_SYNC_NUM_SQ])
+{
+   if (sync->flags & VK_SYNC_IS_TIMELINE)
+      return false;
+
+   simple_mtx_lock(&dev->queue_signals.lock);
+   struct hk_queue_signal *e = hk_queue_signal_find(dev, sync);
+   const bool ordered = e && e->queue == queue;
+   if (ordered) {
+      for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq)
+         prior[sq] = MAX2(prior[sq], e->ordinal[sq]);
+   }
+   if (e)
+      *e = (struct hk_queue_signal){0};
+   simple_mtx_unlock(&dev->queue_signals.lock);
+   return ordered;
+}
+
+/* After a submission: its binary signals are now pending on this queue, up
+ * to the ordinals submitted so far. Without exact ordinals (or for a
+ * submission without commands, whose signal also covers its waits) a later
+ * wait must use the fence: forget them. */
+static void
+hk_queue_note_signals(struct hk_device *dev, struct hk_queue *queue,
+                      const struct vk_queue_submit *submit, bool ordered)
+{
+   if (!submit->signal_count)
+      return;
+
+   simple_mtx_lock(&dev->queue_signals.lock);
+   for (unsigned i = 0; i < submit->signal_count; ++i) {
+      const struct vk_sync *sync = submit->signals[i].sync;
+      struct hk_queue_signal *e = hk_queue_signal_find(dev, sync);
+      if (!ordered ||
+          (sync->flags & (VK_SYNC_IS_TIMELINE | VK_SYNC_IS_SHAREABLE))) {
+         if (e)
+            *e = (struct hk_queue_signal){0};
+         continue;
+      }
+      if (!e) {
+         /* Evicting an entry only costs its wait the fast path. */
+         e = &dev->queue_signals.entries[dev->queue_signals.next];
+         dev->queue_signals.next = (dev->queue_signals.next + 1) %
+                                   ARRAY_SIZE(dev->queue_signals.entries);
+      }
+      *e = (struct hk_queue_signal){
+         .sync = sync,
+         .queue = queue,
+         .ordinal = {queue->sync.submitted[HK_SYNC_VDM],
+                     queue->sync.submitted[HK_SYNC_CDM]},
+      };
+   }
+   simple_mtx_unlock(&dev->queue_signals.lock);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+hk_ImportSemaphoreFdKHR(VkDevice device,
+                        const VkImportSemaphoreFdInfoKHR *pImportSemaphoreFdInfo)
+{
+   VK_FROM_HANDLE(hk_device, dev, device);
+   VK_FROM_HANDLE(vk_semaphore, semaphore, pImportSemaphoreFdInfo->semaphore);
+
+   hk_queue_forget_signal(dev, &semaphore->permanent);
+   return vk_common_ImportSemaphoreFdKHR(device, pImportSemaphoreFdInfo);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+hk_DestroySemaphore(VkDevice device, VkSemaphore _semaphore,
+                    const VkAllocationCallbacks *pAllocator)
+{
+   VK_FROM_HANDLE(hk_device, dev, device);
+   VK_FROM_HANDLE(vk_semaphore, semaphore, _semaphore);
+
+   if (semaphore)
+      hk_queue_forget_signal(dev, &semaphore->permanent);
+   vk_common_DestroySemaphore(device, _semaphore, pAllocator);
+}
+
 static VkResult
 queue_submit(struct hk_device *dev, struct hk_queue *queue,
              struct vk_queue_submit *submit)
@@ -1104,6 +1224,12 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
              queue, (struct hk_cmd_buffer *const *)submit->command_buffers,
              submit->command_buffer_count, false, false, 0))
          return vk_device_set_lost(&dev->vk, "Asahi command ordinal overflow");
+      /* Its waits stay fences (they gate its signals, which no command
+       * carries): consume their entries and forget its signals. */
+      uint64_t unused[HK_SYNC_NUM_SQ] = {0};
+      for (unsigned i = 0; i < submit->wait_count; ++i)
+         hk_queue_take_signal(dev, queue, submit->waits[i].sync, unused);
+      hk_queue_note_signals(dev, queue, submit, false);
       return queue_submit_empty(dev, queue, submit);
    }
 
@@ -1131,7 +1257,14 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
       alloca((submit->wait_count + kernel_signal_count + 1) *
              sizeof(struct drm_asahi_sync));
 
+   /* Waits that queue order covers become prior ordinals of every command. */
+   const bool order_waits = queue->sync.exact_prior && !queue->sync.serialize;
+   uint64_t wait_prior[HK_SYNC_NUM_SQ] = {0};
    for (unsigned i = 0; i < submit->wait_count; ++i) {
+      if (hk_queue_take_signal(dev, queue, submit->waits[i].sync,
+                               wait_prior) && order_waits)
+         continue;
+
       /* The kernel rejects the submission if we try to wait on the same
        * timeline semaphore at multiple points.
        *
@@ -1252,7 +1385,8 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
             agx_cmd_header(cs->type == HK_CS_CDM, cs->sync.barrier[HK_SYNC_VDM],
                            cs->sync.barrier[HK_SYNC_CDM]);
          uint64_t command_prior[HK_SYNC_NUM_SQ] = {
-            cs->sync.prior[HK_SYNC_VDM], cs->sync.prior[HK_SYNC_CDM],
+            MAX2(cs->sync.prior[HK_SYNC_VDM], wait_prior[HK_SYNC_VDM]),
+            MAX2(cs->sync.prior[HK_SYNC_CDM], wait_prior[HK_SYNC_CDM]),
          };
          /* The same recording can occur twice in a merged submit (for
           * example synchronization2.basic.event.none_set_reset). Assign
@@ -1342,7 +1476,8 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
              * the fragment half after them, so this render's vertex work can
              * overlap their fragment work. Compute dependencies keep ordering
              * the vertex half either way. */
-            if (!queue->sync.serialize &&
+            if (!queue->sync.serialize && !wait_prior[HK_SYNC_VDM] &&
+                !wait_prior[HK_SYNC_CDM] &&
                 (dev->dev.params.features &
                  DRM_ASAHI_FEATURE_FRAGMENT_BARRIERS) &&
                 cs->sync.ta_split &&
@@ -1417,6 +1552,8 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
       if (result == VK_SUCCESS)
          result = signal_result;
    }
+   hk_queue_note_signals(dev, queue, submit,
+                         order_waits && result == VK_SUCCESS);
 
    util_dynarray_fini(&payload);
 

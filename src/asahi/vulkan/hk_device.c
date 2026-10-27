@@ -1002,6 +1002,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    *pDevice = hk_device_to_handle(dev);
 
    simple_mtx_init(&dev->vdm.lock, mtx_plain);
+   simple_mtx_init(&dev->queue_signals.lock, mtx_plain);
    list_inithead(&dev->vdm.slabs);
    simple_mtx_init(&dev->scratch.lock, mtx_plain);
    simple_mtx_init(&dev->shader_binary_cache.lock, mtx_plain);
@@ -1089,6 +1090,7 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
 
    hk_device_finish_vdm_slabs(dev);
    simple_mtx_destroy(&dev->vdm.lock);
+   simple_mtx_destroy(&dev->queue_signals.lock);
 
    agx_scratch_fini(&dev->scratch.vs);
    agx_scratch_fini(&dev->scratch.fs);
