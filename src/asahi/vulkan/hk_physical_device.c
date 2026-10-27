@@ -2003,7 +2003,11 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
    }
 
    uint32_t queue_count = 1;
-   if (pdev->dev.params.features & DRM_ASAHI_FEATURE_INDEPENDENT_QUEUES) {
+   /* Under virtio the simple-ioctl path forwards the request struct, not the
+    * buffer .pointer refers to, so the queue-limits query cannot work there.
+    */
+   if ((pdev->dev.params.features & DRM_ASAHI_FEATURE_INDEPENDENT_QUEUES) &&
+       !pdev->dev.is_virtio) {
 #define HK_ADVERTISED_QUEUES 8u
       struct drm_asahi_queue_limits limits = {0};
       struct drm_asahi_get_params query = {
