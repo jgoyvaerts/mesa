@@ -619,6 +619,15 @@ if with_tests
   )
 
   executable(
+    'vulkan-ubo-record-loop',
+    files('tests/vulkan_ubo_record_loop.c'),
+    include_directories : [inc_include],
+    dependencies : [cc.find_library('vulkan'), cc.find_library('m')],
+    c_args : [c_msvc_compat_args],
+    gnu_symbol_visibility : 'hidden',
+  )
+
+  executable(
     'vulkan-render-area',
     files('tests/vulkan_render_area.c'),
     include_directories : [inc_include],
