@@ -126,6 +126,11 @@ struct hk_device {
    struct agxdecode_ctx *decode_ctx;
 
    struct hk_descriptor_table occlusion_queries;
+
+   /* Slot of every occlusion query not begun yet: queries take a slot of
+    * their own on first use (hk_cmd_begin_end_query()), so pools may hold
+    * more queries than the hardware's 15-bit index addresses. Always zero. */
+   uint32_t occlusion_unused;
    struct hk_sampler_heap samplers;
 
    /* Native sampled-image indices are stable for an image-view lifetime.

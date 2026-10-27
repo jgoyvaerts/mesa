@@ -515,6 +515,7 @@ host_zero_queries(struct hk_device *dev, struct hk_query_pool *pool,
    }
 }
 
+
 VKAPI_ATTR VkResult VKAPI_CALL
 hk_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
                    const VkAllocationCallbacks *pAllocator,
@@ -624,22 +625,10 @@ hk_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
       }
    }
 
-   for (unsigned i = 0; i < occlusion_queries; ++i) {
-      uint64_t zero = 0;
-      unsigned index;
-
-      VkResult result = hk_descriptor_table_add(
-         dev, &dev->occlusion_queries, &zero, sizeof(uint64_t), &index);
-
-      if (result != VK_SUCCESS) {
-         hk_DestroyQueryPool(device, hk_query_pool_to_handle(pool), pAllocator);
-         return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
-      }
-
-      /* We increment as we go so we can clean up properly if we run out */
-      assert(pool->oq_queries < occlusion_queries);
-      oq_index[pool->oq_queries++] = index;
-   }
+   /* Queries take a hardware slot when first begun. */
+   for (unsigned i = 0; i < occlusion_queries; ++i)
+      oq_index[i] = dev->occlusion_unused;
+   pool->oq_queries = occlusion_queries;
 
    if (pCreateInfo->flags & VK_QUERY_POOL_CREATE_RESET_BIT_KHR)
       host_zero_queries(dev, pool, 0, pool->vk.query_count, false);
@@ -662,7 +651,8 @@ hk_DestroyQueryPool(VkDevice device, VkQueryPool queryPool,
    uint16_t *oq_index = hk_pool_oq_index_ptr(pool);
 
    for (unsigned i = 0; oq_index && i < pool->oq_queries; ++i) {
-      hk_descriptor_table_remove(dev, &dev->occlusion_queries, oq_index[i]);
+      if (oq_index[i] != dev->occlusion_unused)
+         hk_descriptor_table_remove(dev, &dev->occlusion_queries, oq_index[i]);
    }
 
    if (pool->handle)
@@ -787,6 +777,22 @@ hk_cmd_begin_end_query(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool,
       }
 
       uint16_t *oq_index = hk_pool_oq_index_ptr(pool);
+      if (!end && oq_index[query] == dev->occlusion_unused) {
+         /* First use: take a zeroed slot. Another thread recording the same
+          * query may have taken one meanwhile; keep the first. */
+         const uint64_t zero = 0;
+         uint32_t index;
+         if (hk_descriptor_table_add(dev, &dev->occlusion_queries, &zero,
+                                     sizeof(zero), &index) != VK_SUCCESS) {
+            vk_command_buffer_set_error(&cmd->vk,
+                                        VK_ERROR_OUT_OF_DEVICE_MEMORY);
+            return;
+         }
+         if (p_atomic_cmpxchg(&oq_index[query],
+                              (uint16_t)dev->occlusion_unused,
+                              (uint16_t)index) != dev->occlusion_unused)
+            hk_descriptor_table_remove(dev, &dev->occlusion_queries, index);
+      }
       cmd->state.gfx.occlusion.index = oq_index[query];
       cmd->state.gfx.dirty |= HK_DIRTY_OCCLUSION;
       if (end && pool->oq_submit) {

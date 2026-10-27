@@ -916,6 +916,14 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    if (result != VK_SUCCESS)
       goto fail_sampled_images;
 
+   {
+      const uint64_t zero = 0;
+      result = hk_descriptor_table_add(dev, &dev->occlusion_queries, &zero,
+                                       sizeof(zero), &dev->occlusion_unused);
+      if (result != VK_SUCCESS)
+         goto fail_queries;
+   }
+
    result = hk_upload_rodata(dev);
    if (result != VK_SUCCESS)
       goto fail_queries;
