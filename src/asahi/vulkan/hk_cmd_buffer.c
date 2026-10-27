@@ -3365,6 +3365,8 @@ hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
    }
 
    cs->tib = render->tilebuffer;
+   cs->area_x1 = render->area.offset.x + render->area.extent.width;
+   cs->area_y1 = render->area.offset.y + render->area.extent.height;
 
    /* Assume this is not the first control stream of the render pass, so
     * initially use the partial background/EOT program and ZLS control.
