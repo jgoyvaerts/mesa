@@ -42,6 +42,7 @@
 #include <errno.h>
 #include <string.h>
 #include <fcntl.h>
+#include <poll.h>
 #include "drm-uapi/drm_fourcc.h"
 #include "util/libdrm.h"
 #include "util/cnd_monotonic.h"
@@ -1839,6 +1840,14 @@ x11_present_to_x11_dri3(struct x11_swapchain *chain, uint32_t image_index,
    } else
 #endif
    {
+      /* muvm's X11 bridge hands the buffer to the host X server without the
+       * dma-buf's implicit fences, so it can scan out a half-rendered frame.
+       * Wait for rendering (the write fences) before presenting. */
+      if (image->base.dma_buf_fd >= 0) {
+         struct pollfd pfd = { .fd = image->base.dma_buf_fd, .events = POLLIN };
+         while (poll(&pfd, 1, -1) < 0 && (errno == EINTR || errno == EAGAIN))
+            ;
+      }
       cookie = xcb_present_pixmap(chain->conn,
                                   chain->window,
                                   image->pixmap,
