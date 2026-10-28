@@ -1777,8 +1777,14 @@ hk_queue_init(struct hk_device *dev, const VkDeviceQueueCreateInfo *pCreateInfo,
    queue->vk.driver_submit = hk_queue_submit;
    queue->sync.precise_tile_evictions = agx_is_m4_pro(&dev->dev);
    queue->sync.direct_single_footprints = agx_is_m4_pro(&dev->dev);
-   queue->sync.serialize = dev->dev.params.gpu_generation >= 13 &&
-                           dev->dev.params.gpu_generation <= 14;
+   /* On G17P, a render whose tiling overlaps the previous render's fragment
+    * work intermittently never finishes that fragment work: the firmware times
+    * out and recovers, and the context is lost. Order every command after the
+    * complete prefix there too. HK_SERIALIZE=0 restores the overlap. */
+   queue->sync.serialize = debug_get_bool_option(
+      "HK_SERIALIZE", (dev->dev.params.gpu_generation >= 13 &&
+                       dev->dev.params.gpu_generation <= 14) ||
+                         dev->dev.chip == AGX_CHIP_G17P);
    /* A serialized queue orders every command after both engines' complete
     * prefixes, earlier submissions included. The legacy header encodes that
     * exactly (a zero barrier names every earlier command), so exact prior
