@@ -711,6 +711,15 @@ if with_tests
     gnu_symbol_visibility : 'hidden',
   )
 
+  executable(
+    'vulkan-sample-variant-cache',
+    files('tests/vulkan_sample_variant_cache.c'),
+    include_directories : [inc_include],
+    dependencies : [cc.find_library('vulkan')],
+    c_args : [c_msvc_compat_args],
+    gnu_symbol_visibility : 'hidden',
+  )
+
   # Also no-op shim tests, registered with the shim in ../meson.build.
   g17p_vulkan_compressed_mip_blit = executable(
     'g17p-vulkan-compressed-mip-blit',
