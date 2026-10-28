@@ -9447,6 +9447,9 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
       return false;
    }
 
+   if (agx3_reserve_cube_scratch(ctx))
+      agx_validate(ctx, "cube-array scratch");
+
    /* Record provenance before RA can create stack instructions. */
    const bool imports_only_before_ra = agx3_cprog_spill_provenance(ctx);
    AGX_PASS(ctx, agx_ra);
