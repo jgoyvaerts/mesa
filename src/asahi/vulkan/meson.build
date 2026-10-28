@@ -628,6 +628,15 @@ if with_tests
   )
 
   executable(
+    'vulkan-sample-variant-cache',
+    files('tests/vulkan_sample_variant_cache.c'),
+    include_directories : [inc_include],
+    dependencies : [cc.find_library('vulkan')],
+    c_args : [c_msvc_compat_args],
+    gnu_symbol_visibility : 'hidden',
+  )
+
+  executable(
     'vulkan-render-area',
     files('tests/vulkan_render_area.c'),
     include_directories : [inc_include],
