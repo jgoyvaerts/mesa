@@ -347,6 +347,21 @@ is_attachment_stored(const VkRenderingAttachmentInfo *att)
           att->resolveMode != VK_RESOLVE_MODE_NONE;
 }
 
+/* The partial end-of-tile program must store every colour attachment, so the
+ * next partial render can reload it. When the main program already does, pass
+ * the main program as the partial one: macOS does the same (the kext forwards
+ * Metal's main end-of-tile block as the partial one for every captured pass). */
+static bool
+hk_main_eot_stores_all(const VkRenderingInfo *info)
+{
+   for (unsigned i = 0; i < info->colorAttachmentCount; ++i) {
+      const VkRenderingAttachmentInfo *att = &info->pColorAttachments[i];
+      if (att->imageView != VK_NULL_HANDLE && !is_attachment_stored(att))
+         return false;
+   }
+   return true;
+}
+
 /* LDSHDR's fetch span saturates from 321 bytes of text on, so a longer
  * program, such as a multi-target mixed-format reload, loads exactly like the
  * main fragment shaders of any size. */
@@ -2297,7 +2312,9 @@ hk_g17p_elide_untouched_color(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
    const struct hk_bg_eot eot_main =
       hk_build_bg_eot(cmd, &info, true, false, incomplete_render_area, NULL);
    const struct hk_bg_eot eot_partial =
-      hk_build_bg_eot(cmd, &info, true, true, incomplete_render_area, NULL);
+      hk_main_eot_stores_all(&info)
+         ? eot_main
+         : hk_build_bg_eot(cmd, &info, true, true, incomplete_render_area, NULL);
    if (vk_command_buffer_has_error(&cmd->vk))
       return;
 
@@ -3514,8 +3531,10 @@ hk_begin_rendering(VkCommandBuffer commandBuffer,
       return;
 
    render->cr.eot.partial =
-      hk_build_bg_eot(cmd, pRenderingInfo, true, true,
-                      incomplete_render_area, bg_eot_cache);
+      hk_main_eot_stores_all(pRenderingInfo)
+         ? render->cr.eot.main
+         : hk_build_bg_eot(cmd, pRenderingInfo, true, true,
+                           incomplete_render_area, bg_eot_cache);
    if (vk_command_buffer_has_error(&cmd->vk))
       return;
 
