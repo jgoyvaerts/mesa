@@ -7,13 +7,19 @@
  * samples=4 sample_size=8 tile_size=512") and vkEndCommandBuffer returned
  * VK_ERROR_FEATURE_NOT_PRESENT. The default set reproduces that line.
  *
+ * With a reloaded attachment the 4x tile keeps eight bytes a sample and the
+ * rest spill to memory. A pipeline draw with alpha-to-coverage then failed to
+ * compile its fragment epilog ("Unhandled intrinsic load_sample_id"), which
+ * also ended in VK_ERROR_FEATURE_NOT_PRESENT: `... load a2c` reproduces that.
+ *
  * Pass 1 clears each attachment (loadOp CLEAR, storeOp STORE). Pass 2 reloads
- * them (loadOp LOAD), clears the left half with vkCmdClearAttachments (a
- * fragment draw) and resolves them. Each resolved image must equal a
- * single-sample reference given the same clears.
+ * them (loadOp LOAD), writes the left half with vkCmdClearAttachments or a
+ * pipeline draw (opaque colours, optionally with alpha-to-coverage) and
+ * resolves them. Each resolved image must equal a single-sample reference
+ * given the same colours.
  *
  *   vulkan-msaa-mrt [formats=rgba8,r11g11b10f,none] [attachments=3] [samples=4]
- *                   [pass2=load|clear]
+ *                   [pass2=load|clear] [write=clear|draw|a2c]
  *   formats: one name repeated `attachments` times, or a comma-separated list
  *   with one name per attachment ("none" = VK_NULL_HANDLE view):
  *   rgba16f rgba8 rg16f r32f rg32f rgba32f rgb10a2 r11g11b10f none
@@ -23,6 +29,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <vulkan/vulkan.h>
+
+#include "vulkan_msaa_mrt_shaders.h"
 
 #define CHECK(x)                                                              \
    do {                                                                       \
@@ -146,8 +154,74 @@ colour(unsigned att, unsigned pass)
    VkClearColorValue c = {{0, 0, 0, 1}};
    c.float32[att % 3] = 1.0f;
    c.float32[(att + pass + 1) % 3] = pass ? 0.5f : 0.0f;
-   c.float32[3] = pass ? 0.0f : 1.0f;
+   /* Pass 2 is opaque, so alpha-to-coverage keeps every sample. */
+   c.float32[3] = pass ? 1.0f : 0.0f;
    return c;
+}
+
+static VkShaderModule
+make_module(const uint32_t *code, size_t size)
+{
+   VkShaderModuleCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+                                  .codeSize = size, .pCode = code};
+   VkShaderModule m;
+   CHECK(vkCreateShaderModule(dev, &ci, NULL, &m));
+   return m;
+}
+
+static VkPipeline
+make_pipeline(const VkFormat *fmt, unsigned count, unsigned samples, bool a2c,
+              VkPipelineLayout *layout)
+{
+   VkPushConstantRange pcr = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 8 * 16};
+   VkPipelineLayoutCreateInfo lci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                     .pushConstantRangeCount = 1,
+                                     .pPushConstantRanges = &pcr};
+   CHECK(vkCreatePipelineLayout(dev, &lci, NULL, layout));
+
+   VkPipelineShaderStageCreateInfo stages[2] = {
+      {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+       .stage = VK_SHADER_STAGE_VERTEX_BIT,
+       .module = make_module(msaa_mrt_vert, sizeof(msaa_mrt_vert)), .pName = "main"},
+      {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+       .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+       .module = make_module(msaa_mrt_frag, sizeof(msaa_mrt_frag)), .pName = "main"},
+   };
+   VkPipelineVertexInputStateCreateInfo vi = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+   VkPipelineInputAssemblyStateCreateInfo ia = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+      .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
+   VkViewport vp = {0, 0, W, H, 0, 1};
+   VkRect2D scissor = {{0, 0}, {W / 2, H}};
+   VkPipelineViewportStateCreateInfo vps = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+      .viewportCount = 1, .pViewports = &vp, .scissorCount = 1, .pScissors = &scissor};
+   VkPipelineRasterizationStateCreateInfo rs = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+      .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE,
+      .lineWidth = 1.0f};
+   VkPipelineMultisampleStateCreateInfo ms = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+      .rasterizationSamples = samples, .alphaToCoverageEnable = a2c};
+   VkPipelineColorBlendAttachmentState blend[MAX_ATT];
+   for (unsigned i = 0; i < count; i++)
+      blend[i] = (VkPipelineColorBlendAttachmentState){.colorWriteMask = 0xf};
+   VkPipelineColorBlendStateCreateInfo cbs = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+      .attachmentCount = count, .pAttachments = blend};
+   VkPipelineRenderingCreateInfo rci = {
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+      .colorAttachmentCount = count, .pColorAttachmentFormats = fmt};
+   VkGraphicsPipelineCreateInfo gci = {
+      .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+      .pNext = &rci, .stageCount = 2, .pStages = stages,
+      .pVertexInputState = &vi, .pInputAssemblyState = &ia,
+      .pViewportState = &vps, .pRasterizationState = &rs,
+      .pMultisampleState = &ms, .pColorBlendState = &cbs, .layout = *layout};
+   VkPipeline pipeline;
+   CHECK(vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gci, NULL, &pipeline));
+   return pipeline;
 }
 
 int
@@ -157,6 +231,10 @@ main(int argc, char **argv)
    unsigned count = argc > 2 ? atoi(argv[2]) : 3;
    unsigned samples = argc > 3 ? atoi(argv[3]) : 4;
    bool pass2_load = !(argc > 4 && !strcmp(argv[4], "clear"));
+   const char *write = argc > 5 ? argv[5] : "clear";
+   const bool draw = !strcmp(write, "draw") || !strcmp(write, "a2c");
+   if (!draw && strcmp(write, "clear"))
+      goto usage;
    VkFormat fmt[MAX_ATT];
    unsigned bpp[MAX_ATT];
    char names[256];
@@ -175,7 +253,8 @@ main(int argc, char **argv)
       count = listed;
    if (!listed || !count || count > MAX_ATT) {
    usage:
-      fprintf(stderr, "usage: %s [format[,format...]] [attachments<=8] [samples] [load|clear]\n",
+      fprintf(stderr, "usage: %s [format[,format...]] [attachments<=8] [samples] [load|clear] "
+                      "[clear|draw|a2c]\n",
               argv[0]);
       return 2;
    }
@@ -183,8 +262,10 @@ main(int argc, char **argv)
       fmt[i] = fmt[0];
       bpp[i] = bpp[0];
    }
-   printf("%u attachments (%s), %ux, pass 2 loadOp %s\n", count, list, samples,
-          pass2_load ? "LOAD" : "CLEAR");
+   printf("%u attachments (%s), %ux, pass 2 loadOp %s, %s\n", count, list, samples,
+          pass2_load ? "LOAD" : "CLEAR",
+          draw ? (strcmp(write, "a2c") ? "draw" : "draw with alpha-to-coverage")
+               : "vkCmdClearAttachments");
 
    VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
                             .apiVersion = VK_API_VERSION_1_3};
@@ -217,6 +298,11 @@ main(int argc, char **argv)
    CHECK(vkCreateDevice(pdev, &dci, NULL, &dev));
    VkQueue queue;
    vkGetDeviceQueue(dev, 0, 0, &queue);
+
+   VkPipelineLayout layout = VK_NULL_HANDLE;
+   VkPipeline pipeline = draw ? make_pipeline(fmt, count, samples,
+                                              !strcmp(write, "a2c"), &layout)
+                              : VK_NULL_HANDLE;
 
    VkImage ms[MAX_ATT], res[MAX_ATT], ref[MAX_ATT];
    VkImageView ms_view[MAX_ATT] = {0}, res_view[MAX_ATT] = {0}, ref_view[MAX_ATT] = {0};
@@ -295,7 +381,15 @@ main(int argc, char **argv)
       }
       barrier(cb);
       vkCmdBeginRendering(cb, &ri);
-      if (pass) {
+      if (pass && draw) {
+         VkClearColorValue pc[8] = {0};
+         for (unsigned i = 0; i < count; i++)
+            pc[i] = colour(i, 1);
+         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+         vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                            sizeof(pc), pc);
+         vkCmdDraw(cb, 3, 1, 0, 0);
+      } else if (pass) {
          VkClearAttachment ca[MAX_ATT];
          for (unsigned i = 0; i < count; i++)
             ca[i] = (VkClearAttachment){VK_IMAGE_ASPECT_COLOR_BIT, i,
