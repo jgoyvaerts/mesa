@@ -1514,6 +1514,8 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
        * launch between them is a shape Apple's CDM emitter never produces and
        * the G17P stream oracle rejects. */
       cs->weak_barrier_end = cs->current;
+      if (unlikely(hk_cmd_buffer_device(cmd)->frame_anatomy))
+         hk_frame_anatomy_note_precomp(cs, idx, grid);
       cs->stats.cmds++;
       return;
    }
@@ -1550,6 +1552,8 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
    } else {
       cs->weak_barrier_end = cs->current;
    }
+   if (unlikely(hk_cmd_buffer_device(cmd)->frame_anatomy))
+      hk_frame_anatomy_note_precomp(cs, idx, grid);
    cs->stats.cmds++;
 }
 
