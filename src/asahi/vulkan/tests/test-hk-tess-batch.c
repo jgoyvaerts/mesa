@@ -337,6 +337,31 @@ main(void)
    hk_tess_batch_reset(cmd);
    T("reset", cmd->tess_batch.draws == 0 && !cmd->tess_batch.stages[0]);
 
+   /* A render with interleaved batched draws, other pre-graphics work (a
+    * query, say) and flushes keeps its one render stream and one
+    * pre-graphics stream: batching never adds a hardware render. */
+   cmd = new_cmd();
+   struct hk_cs render = {.cmd = cmd, .type = HK_CS_VDM};
+   list_addtail(&render.node, &cmd->control_streams);
+   cmd->current_cs.gfx = &render;
+   pre = open_pre_gfx(cmd);
+   for (unsigned d = 0; d < 64; ++d) {
+      record_draw(cmd, d, 0);
+      if (d % 8 == 7)
+         other_work(cmd);
+   }
+   T("mixed render: one render, one pre-graphics stream",
+     cmd->current_cs.gfx == &render && cmd->current_cs.pre_gfx == pre &&
+        list_length(&cmd->control_streams) == 2 &&
+        list_first_entry(&cmd->control_streams, struct hk_cs, node) == pre);
+   list_del(&render.node);
+   cmd->current_cs.gfx = NULL;
+   hk_cmd_buffer_end_graphics(cmd);
+   n = decode(pre, r, MAX_RECORDS, &link_ok);
+   T("mixed render: 8 batches of 8 draws, each followed by its work",
+     count(r, n, OTHER) == 8 && count(r, n, STRONG) == 8 * (5 + 1) &&
+        cmd->tess_batch.draws == 0);
+
    /* Which draws may join a batch. */
    struct agx_draw direct = {.b = agx_3d(3, 1, 1)};
    struct agx_draw indirect = {.b = agx_grid_indirect(0x10000)};
