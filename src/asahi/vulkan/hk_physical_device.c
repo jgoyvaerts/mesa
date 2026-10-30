@@ -1668,7 +1668,7 @@ hk_codegen_env_hash(void)
    static const char *const runtime_only[] = {
       "TRACE", "DUMP", "_LOG", "PERF", "VERBOSE", "DEBUG_OBJECT", "SLOW_DRAW",
       "DISK_CACHE_ID", "LAZY_GENERIC", "FORCE_GENERIC", "BIND_PREDICT",
-      "VARIANT_TRACE", "SLOW_SUBMIT", "PROLOG_DISK_CACHE",
+      "VARIANT_TRACE", "SLOW_SUBMIT", "PROLOG_DISK_CACHE", "FRAME_ANATOMY",
    };
    const char *list[512];
    unsigned n = 0;
