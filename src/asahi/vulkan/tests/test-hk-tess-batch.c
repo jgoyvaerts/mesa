@@ -1,0 +1,481 @@
+/*
+ * Copyright 2026 Aurora Silicon
+ * SPDX-License-Identifier: MIT
+ *
+ * Batched tessellation stages (hk_tess_batch.c): the real side streams,
+ * splice, flush points and hk_cs_merge_cdm(), with launches, cache flushes,
+ * chunks and stream links replaced by words this test decodes again. No GPU
+ * or DRM calls.
+ */
+#include "hk_cmd_buffer.h"
+#include "hk_device.h"
+#include "hk_tess_batch.h"
+
+#undef NDEBUG
+#include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static unsigned tests, failures;
+
+#define T(name, cond)                                                          \
+   do {                                                                        \
+      tests++;                                                                 \
+      if (!(cond)) {                                                           \
+         failures++;                                                           \
+         printf("FAIL %s line %d\n", name, __LINE__);                          \
+      } else                                                                   \
+         printf("PASS %s\n", name);                                            \
+   } while (0)
+
+/* Records, one word each; a link carries its target in the next two. */
+enum {
+   LAUNCH = 0x10000000, /* | draw << 4 | stage */
+   WEAK = 0x20000000,   /* the weak ordering tail of a launch */
+   STRONG = 0x30000000, /* a cache flush */
+   LINK = 0x40000000,
+   OTHER = 0x50000000,  /* unrelated pre-graphics work */
+   KIND = 0xf0000000,
+};
+
+#define CHUNK 65536
+static void *chunks[256];
+static unsigned nchunks;
+
+static struct agx_ptr
+chunk_alloc(void)
+{
+   assert(nchunks < ARRAY_SIZE(chunks));
+   void *p = calloc(1, CHUNK);
+   chunks[nchunks++] = p;
+   return (struct agx_ptr){.cpu = p, .gpu = (uintptr_t)p};
+}
+
+struct agx_ptr
+hk_pool_cs_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment)
+{
+   (void)cmd;
+   (void)alignment;
+   assert(size <= CHUNK);
+   return chunk_alloc();
+}
+
+void *
+hk_cmd_buffer_emit_cs_jump(struct hk_cmd_buffer *cmd, void *current,
+                           uint64_t target, bool vdm)
+{
+   (void)cmd;
+   assert(!vdm);
+   uint32_t *w = current;
+   w[0] = LINK;
+   memcpy(&w[1], &target, sizeof(target));
+   return (uint8_t *)current + AGX_CDM_STREAM_LINK_LENGTH;
+}
+
+/* As the driver's: move to a new chunk through a link when the space does
+ * not fit. */
+void
+hk_ensure_cs_has_space(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+                       size_t space)
+{
+   if (hk_cs_space_fits((uint8_t *)cs->end - (uint8_t *)cs->current, space,
+                        AGX_CDM_STREAM_LINK_LENGTH))
+      return;
+
+   struct agx_ptr t = chunk_alloc();
+   hk_cmd_buffer_emit_cs_jump(cmd, cs->current, t.gpu, false);
+   cs->current = t.cpu;
+   cs->end = (uint8_t *)t.cpu + CHUNK;
+   cs->chunk = t;
+   cs->stream_linked = true;
+}
+
+static void
+put(struct hk_cs *cs, uint32_t word)
+{
+   *(uint32_t *)cs->current = word;
+   cs->current = (uint8_t *)cs->current + 4;
+}
+
+/* As hk_cdm_flush(): strengthen a trailing barrier in place, else append. */
+void
+hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
+{
+   (void)dev;
+   if (cs->current == cs->strong_flush_end)
+      return;
+   if (cs->current == cs->weak_barrier_end)
+      ((uint32_t *)cs->current)[-1] = STRONG;
+   else
+      put(cs, STRONG);
+   cs->strong_flush_end = cs->current;
+   cs->weak_barrier_end = NULL;
+   cs->stats.flushes++;
+}
+
+/* A native launch: the record and its weak ordering tail. */
+static void
+launch(struct hk_cs *cs, unsigned draw, unsigned stage)
+{
+   hk_ensure_cs_has_space(cs->cmd, cs, 0x2000);
+   put(cs, LAUNCH | draw << 4 | stage);
+   put(cs, WEAK);
+   cs->weak_barrier_end = cs->current;
+   cs->stats.cmds++;
+}
+
+/* hk_launch_tess_batched(): VS and TCS straight into their side streams, the
+ * precompiled kernels through the pre-graphics getter standing in for them.
+ * A stage in `skip` dispatches nothing (an empty grid). */
+static void
+record_draw(struct hk_cmd_buffer *cmd, unsigned draw, unsigned skip)
+{
+   struct hk_tess_batch *batch = &cmd->tess_batch;
+   assert(hk_tess_batch_open(cmd));
+
+   for (unsigned stage = HK_TESS_STAGE_VS; stage <= HK_TESS_STAGE_TCS; ++stage) {
+      struct hk_cs *cs = hk_tess_batch_stage(cmd, stage);
+      if (!(skip & BITFIELD_BIT(stage)))
+         launch(cs, draw, stage);
+   }
+
+   struct hk_cs *pre_gfx = cmd->current_cs.pre_gfx;
+   batch->recording = true;
+   for (unsigned stage = HK_TESS_STAGE_COUNT; stage < HK_TESS_STAGES; ++stage) {
+      cmd->current_cs.pre_gfx = hk_tess_batch_stage(cmd, stage);
+      if (!(skip & BITFIELD_BIT(stage))) {
+         struct hk_cs *cs =
+            hk_cmd_buffer_get_cs_general(cmd, &cmd->current_cs.pre_gfx, true);
+         assert(cs == batch->stages[stage]);
+         launch(cs, draw, stage);
+      }
+   }
+   cmd->current_cs.pre_gfx = pre_gfx;
+   batch->recording = false;
+   batch->draws++;
+}
+
+/* Other work for the pre-graphics stream, ending in a flush. */
+static void
+other_work(struct hk_cmd_buffer *cmd)
+{
+   struct hk_cs *cs =
+      hk_cmd_buffer_get_cs_general(cmd, &cmd->current_cs.pre_gfx, true);
+   hk_ensure_cs_has_space(cmd, cs, 0x2000);
+   put(cs, OTHER);
+   cs->stats.cmds++;
+   hk_cdm_cache_flush(NULL, cs);
+}
+
+/* The records of a stream in execution order, following its links. A link
+ * must follow a barrier; returns the record count. */
+static unsigned
+decode(const struct hk_cs *cs, uint32_t *out, unsigned max, bool *link_ok)
+{
+   const uint32_t *w = cs->start;
+   unsigned n = 0;
+   *link_ok = true;
+   while ((const void *)w != cs->current) {
+      if ((*w & KIND) == LINK) {
+         uint64_t target;
+         memcpy(&target, &w[1], sizeof(target));
+         if (!n || ((out[n - 1] & KIND) != WEAK && (out[n - 1] & KIND) != STRONG))
+            *link_ok = false;
+         w = (const uint32_t *)(uintptr_t)target;
+         continue;
+      }
+      assert(n < max);
+      out[n++] = *w++;
+   }
+   return n;
+}
+
+static unsigned
+count(const uint32_t *r, unsigned n, uint32_t kind)
+{
+   unsigned c = 0;
+   for (unsigned i = 0; i < n; ++i)
+      c += (r[i] & KIND) == kind;
+   return c;
+}
+
+/* Whether r is `draws` launches of each stage not in `skip`, stage by stage
+ * in draw order, with only a flush after each stage. */
+static bool
+stage_major(const uint32_t *r, unsigned n, unsigned first, unsigned draws,
+            unsigned skip)
+{
+   unsigned i = 0;
+   for (unsigned stage = 0; stage < HK_TESS_STAGES; ++stage) {
+      if (skip & BITFIELD_BIT(stage))
+         continue;
+      for (unsigned d = first; d < first + draws; ++d) {
+         if (i >= n || r[i++] != (LAUNCH | d << 4 | stage))
+            return false;
+      }
+      if (i >= n || r[i++] != STRONG)
+         return false;
+   }
+   return i == n;
+}
+
+static struct hk_cmd_buffer *
+new_cmd(void)
+{
+   struct hk_device *dev = calloc(1, sizeof(*dev));
+   dev->dev.chip = AGX_CHIP_G17P;
+   struct hk_cmd_buffer *cmd = calloc(1, sizeof(*cmd));
+   cmd->vk.base.device = &dev->vk;
+   list_inithead(&cmd->control_streams);
+   return cmd;
+}
+
+static struct hk_cs *
+open_pre_gfx(struct hk_cmd_buffer *cmd)
+{
+   return hk_cmd_buffer_get_cs_general(cmd, &cmd->current_cs.pre_gfx, true);
+}
+
+#define MAX_RECORDS (4 * 4096 * HK_TESS_STAGES)
+static uint32_t r[MAX_RECORDS];
+
+int
+main(void)
+{
+   bool link_ok;
+   unsigned n;
+
+   /* Three draws: five flushes, not fifteen, and no weak barrier between
+    * the launches of a stage. */
+   struct hk_cmd_buffer *cmd = new_cmd();
+   struct hk_cs *pre = open_pre_gfx(cmd);
+   for (unsigned d = 0; d < 3; ++d)
+      record_draw(cmd, d, 0);
+   T("pending until a flush point",
+     pre->current == pre->start && cmd->tess_batch.draws == 3);
+   hk_tess_batch_flush(cmd);
+   n = decode(pre, r, MAX_RECORDS, &link_ok);
+   T("3 draws: stage-major", stage_major(r, n, 0, 3, 0));
+   T("3 draws: 5 barriers", count(r, n, STRONG) == 5 && count(r, n, WEAK) == 0);
+   T("3 draws: stats", pre->stats.cmds == 15 && cmd->tess_batch.draws == 0);
+   T("side streams handed over",
+     !cmd->tess_batch.stages[0] && !cmd->tess_batch.stages[4]);
+
+   /* 4096 draws: stages that no longer fit the pre-graphics root are linked
+    * instead of copied, and so are the chunks of the side streams. */
+   cmd = new_cmd();
+   pre = open_pre_gfx(cmd);
+   for (unsigned d = 0; d < 4096; ++d)
+      record_draw(cmd, d, 0);
+   hk_tess_batch_flush(cmd);
+   n = decode(pre, r, MAX_RECORDS, &link_ok);
+   T("4096 draws: stage-major", stage_major(r, n, 0, 4096, 0));
+   T("4096 draws: 5 barriers", count(r, n, STRONG) == 5 && count(r, n, WEAK) == 0);
+   T("4096 draws: linked", pre->stream_linked);
+   T("4096 draws: links follow barriers", link_ok);
+
+   /* Other pre-graphics work splits the batch: it follows the tessellation
+    * of the draws before it and precedes that of the draws after it. */
+   cmd = new_cmd();
+   pre = open_pre_gfx(cmd);
+   record_draw(cmd, 0, 0);
+   record_draw(cmd, 1, 0);
+   other_work(cmd);
+   T("other work flushes the batch", cmd->tess_batch.draws == 0);
+   record_draw(cmd, 2, 0);
+   hk_tess_batch_flush(cmd);
+   n = decode(pre, r, MAX_RECORDS, &link_ok);
+   const unsigned first = 2 * HK_TESS_STAGES + HK_TESS_STAGES;
+   T("split: first batch", stage_major(r, first, 0, 2, 0));
+   T("split: other work after it", n > first && r[first] == OTHER &&
+                                      r[first + 1] == STRONG);
+   T("split: second batch",
+     stage_major(r + first + 2, n - first - 2, 2, 1, 0));
+
+   /* The batch's own fetch of the pre-graphics stream does not flush it. */
+   record_draw(cmd, 3, 0);
+   cmd->tess_batch.recording = true;
+   T("recording: kept", open_pre_gfx(cmd) == pre && cmd->tess_batch.draws == 1);
+   cmd->tess_batch.recording = false;
+
+   /* The end of the render splices what is pending. */
+   const unsigned before = n;
+   hk_cmd_buffer_end_graphics(cmd);
+   n = decode(pre, r, MAX_RECORDS, &link_ok);
+   T("end of render flushes", cmd->current_cs.pre_gfx == NULL &&
+                                 cmd->tess_batch.draws == 0 &&
+                                 stage_major(r + before, n - before, 3, 1, 0));
+
+   /* Stages without launches add no barrier: no two barriers adjacent. */
+   cmd = new_cmd();
+   pre = open_pre_gfx(cmd);
+   const unsigned skip = BITFIELD_BIT(HK_TESS_STAGE_TCS);
+   for (unsigned d = 0; d < 4; ++d)
+      record_draw(cmd, d, skip);
+   hk_tess_batch_flush(cmd);
+   n = decode(pre, r, MAX_RECORDS, &link_ok);
+   T("empty stage: no barrier for it",
+     stage_major(r, n, 0, 4, skip) && count(r, n, STRONG) == 4);
+
+   /* A launch that a stage then skips (an empty grid after its tail was
+    * dropped) still gets a barrier after it. */
+   cmd = new_cmd();
+   pre = open_pre_gfx(cmd);
+   record_draw(cmd, 0, 0);
+   record_draw(cmd, 1, BITFIELD_MASK(HK_TESS_STAGES));
+   hk_tess_batch_flush(cmd);
+   n = decode(pre, r, MAX_RECORDS, &link_ok);
+   T("skipped last launch: flushed", stage_major(r, n, 0, 1, 0));
+
+   /* Nothing pending: no records. */
+   hk_tess_batch_flush(cmd);
+   T("empty flush", decode(pre, r, MAX_RECORDS, &link_ok) == n);
+
+   /* Reset drops unspliced side streams. */
+   record_draw(cmd, 2, 0);
+   hk_tess_batch_reset(cmd);
+   T("reset", cmd->tess_batch.draws == 0 && !cmd->tess_batch.stages[0]);
+
+   /* Which draws may join a batch. */
+   struct agx_draw direct = {.b = agx_3d(3, 1, 1)};
+   struct agx_draw indirect = {.b = agx_grid_indirect(0x10000)};
+   T("batchable: direct", hk_tess_batchable(AGX_CHIP_G17P, direct, false, false));
+   T("batchable: not indirect",
+     !hk_tess_batchable(AGX_CHIP_G17P, indirect, false, false));
+   T("batchable: not with a geometry shader",
+     !hk_tess_batchable(AGX_CHIP_G17P, direct, true, false));
+   T("batchable: not with queries counting",
+     !hk_tess_batchable(AGX_CHIP_G17P, direct, false, true));
+   T("batchable: not on other chips",
+     !hk_tess_batchable(AGX_CHIP_G13G, direct, false, false));
+
+   for (unsigned i = 0; i < nchunks; ++i)
+      free(chunks[i]);
+   printf("%u/%u passed\n", tests - failures, tests);
+   return failures ? 1 : 0;
+}
+
+/* Paths these fixtures never take. */
+void
+hk_flush_deferred_clears_why(struct hk_cmd_buffer *cmd, const char *why)
+{
+   (void)cmd;
+   (void)why;
+   abort();
+}
+
+void
+hk_sync_check_cs(struct hk_cmd_buffer *cmd)
+{
+   (void)cmd;
+   abort();
+}
+
+bool
+hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   (void)cmd;
+   (void)cs;
+   abort();
+}
+
+void
+hk_sync_stream_created(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+                       struct hk_cs **slot, bool compute)
+{
+   (void)cmd;
+   (void)cs;
+   (void)slot;
+   (void)compute;
+}
+
+void
+hk_flush_query_resets(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   (void)cmd;
+   (void)cs;
+   abort();
+}
+
+void
+hk_sync_note_xfer_write(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   (void)cmd;
+   (void)cs;
+   abort();
+}
+
+void
+hk_dispatch_imm_writes(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   (void)cmd;
+   (void)cs;
+   abort();
+}
+
+bool
+hk_defer_oq_available(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   (void)cmd;
+   (void)cs;
+   abort();
+}
+
+void
+hk_sync_forget_stream(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   (void)cmd;
+   (void)cs;
+   abort();
+}
+
+bool
+hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd)
+{
+   (void)cmd;
+   abort();
+}
+
+void *
+hk_cmd_buffer_emit_vdm_terminate(struct hk_cmd_buffer *cmd, void *current)
+{
+   (void)cmd;
+   (void)current;
+   abort();
+}
+
+uint64_t
+hk_pool_upload(struct hk_cmd_buffer *cmd, const void *data, uint32_t size,
+               uint32_t alignment)
+{
+   (void)cmd;
+   (void)data;
+   (void)size;
+   (void)alignment;
+   abort();
+}
+
+uint64_t
+hk_pool_usc_upload(struct hk_cmd_buffer *cmd, const void *data, uint32_t size,
+                   uint32_t alignment)
+{
+   (void)cmd;
+   (void)data;
+   (void)size;
+   (void)alignment;
+   abort();
+}
+
+/* Only hk_tess_batch_open() sets an error, on allocation failure. */
+VkResult
+__vk_errorf(const void *obj, VkResult error, const char *file, int line,
+            const char *format, ...)
+{
+   (void)obj;
+   (void)file;
+   (void)line;
+   (void)format;
+   abort();
+   return error;
+}

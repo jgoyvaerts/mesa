@@ -286,6 +286,7 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd)
       list_del(&it->node);
       hk_cs_destroy(it);
    }
+   hk_tess_batch_reset(cmd);
 
    hk_ioto_arena_finish(cmd);
    hk_cmd_buffer_release_bos(cmd, &dev->dev);

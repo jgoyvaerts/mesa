@@ -109,6 +109,14 @@ hk_sync_forget_stream(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
    abort();
 }
 
+/* No tessellation is batched here. */
+void
+hk_tess_batch_flush(struct hk_cmd_buffer *cmd)
+{
+   (void)cmd;
+   abort();
+}
+
 /* Query resets are not transfers. */
 void
 hk_sync_note_xfer_write(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
