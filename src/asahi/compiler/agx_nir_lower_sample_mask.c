@@ -308,7 +308,9 @@ accumulate_demote(nir_builder *b, nir_intrinsic_instr *intr, void *data)
  * demoted lanes by an exact boolean negation of the demote's guard. A G17P
  * texture result carried across a later loop is also lane-dependent: hardware
  * drops intermittent fragment groups if a coverage kill precedes that shape,
- * even when the loop executes zero iterations.
+ * even when the loop executes zero iterations. That did not reproduce on G17P
+ * with one testing update per group (see update_coverage_after_last_demote),
+ * but the other chips here have not been retested.
  */
 static bool
 derivative_instr(const nir_instr *instr)
@@ -734,24 +736,28 @@ worth_splitting(nir_cf_node *node)
 
 static nir_if *split_if_after_last_demote(nir_builder *b, nir_if *nif);
 
+/* Where the work after a demoting node starts. */
+static nir_cursor
+after_demoting_node(nir_cf_node *node)
+{
+   if (node->type == nir_cf_node_block) {
+      return nir_after_instr(
+         &last_discard_in_block(nir_cf_node_as_block(node))->instr);
+   }
+
+   return nir_after_cf_node_and_phis(node);
+}
+
 /* Move what follows the last demote of the list to the builder's cursor. */
 static void
 move_after_last_demote(nir_builder *b, struct exec_list *list)
 {
    nir_cf_node *node = last_demote_node(list);
-   nir_cursor begin;
 
-   if (!node) {
-      begin = nir_before_cf_list(list);
-   } else if (node->type == nir_cf_node_block) {
-      begin = nir_after_instr(
-         &last_discard_in_block(nir_cf_node_as_block(node))->instr);
-   } else {
-      if (worth_splitting(node))
-         split_if_after_last_demote(b, nir_cf_node_as_if(node));
-      begin = nir_after_cf_node_and_phis(node);
-   }
+   if (worth_splitting(node))
+      split_if_after_last_demote(b, nir_cf_node_as_if(node));
 
+   nir_cursor begin = node ? after_demoting_node(node) : nir_before_cf_list(list);
    nir_cf_list rest;
    nir_cf_extract(&rest, begin, nir_after_cf_list(list));
    b->cursor = nir_cf_reinsert(&rest, b->cursor);
@@ -807,13 +813,8 @@ update_coverage_after_last_demote(nir_builder *b, nir_function_impl *impl,
       b->cursor = nir_after_cf_node(node);
       nir_if *rest = split_if_after_last_demote(b, nir_cf_node_as_if(node));
       b->cursor = nir_before_cf_node(&rest->cf_node);
-   } else if (!node) {
-      b->cursor = nir_before_impl(impl);
-   } else if (node->type == nir_cf_node_block) {
-      b->cursor = nir_after_instr(
-         &last_discard_in_block(nir_cf_node_as_block(node))->instr);
    } else {
-      b->cursor = nir_after_cf_node_and_phis(node);
+      b->cursor = node ? after_demoting_node(node) : nir_before_impl(impl);
    }
 
    final_coverage_update(b, nir_load_var(b, killed), false);
@@ -898,7 +899,7 @@ lower_sample_mask_deferred(nir_shader *shader, bool uniform_tests,
 
    /* Unconditional top-level demotes are handled where they occur: their
     * block continues in uniform control flow. No dead-quad kill may precede
-    * a sampled loop: every coverage update has to stay after it. */
+    * a sampled loop in this late form: every update stays after it. */
    if (!early_update && !cf_list_has(&impl->body, subgroup_instr) &&
        !sampled_loop_after_demote) {
       nir_foreach_block(block, impl) {
