@@ -34,6 +34,9 @@ enum shape {
    DEMOTE_IN_LOOP_IN_ARM,
    DEMOTES_IN_NESTED_ARMS,
    MEMORY_WRITE_AFTER,
+   SAMPLE_SHADING_AFTER,
+   DEPTH_WRITE_AFTER,
+   FORCED_EARLY_AFTER,
 };
 
 /* More work below a demote than splitting an if around the update costs. */
@@ -224,6 +227,18 @@ build(enum shape s)
       out = nir_ddx(&b, y);
       b.shader->info.writes_memory = true;
       break;
+   case SAMPLE_SHADING_AFTER:
+      out = nir_ddx(&b, y);
+      b.shader->info.fs.uses_sample_shading = true;
+      break;
+   case DEPTH_WRITE_AFTER:
+      out = nir_ddx(&b, y);
+      b.shader->info.outputs_written |= BITFIELD64_BIT(FRAG_RESULT_DEPTH);
+      break;
+   case FORCED_EARLY_AFTER:
+      out = nir_ddx(&b, y);
+      b.shader->info.fs.early_fragment_tests = true;
+      break;
    }
 
    agx_test_store_output(&b, out, nir_imm_int(&b, 0), nir_type_float32,
@@ -399,6 +414,30 @@ TEST_F(DemoteEarlyKill, G17PKeepsTheUpdateLateWhereItIsObservable)
    EXPECT_FALSE(lower_g17p(ACTIVE_INDEX_AFTER));
    EXPECT_FALSE(lower_g17p(LOWERED_QUAD_BALLOT_AFTER));
    EXPECT_FALSE(lower_g17p(MEMORY_WRITE_AFTER));
+   EXPECT_FALSE(lower_g17p(SAMPLE_SHADING_AFTER));
+}
+
+/* These two have other reasons to keep a coverage update at the end: it is a
+ * pure kill there, with the tests already run or left to zs_emit. */
+TEST_F(DemoteEarlyKill, G17PDepthWritesAndForcedEarlyTestsStayLate)
+{
+   for (enum shape s : {DEPTH_WRITE_AFTER, FORCED_EARLY_AFTER}) {
+      nir_shader *nir = build(s);
+      agx_nir_lower_discard_zs_emit(nir);
+      agx_nir_lower_sample_mask_deferred_g17p(nir);
+      nir_validate_shader(nir, "late coverage");
+
+      nir_block *last = nir_impl_last_block(nir_shader_get_entrypoint(nir));
+      bool kill_in_last_block = false;
+      nir_foreach_instr(instr, last) {
+         kill_in_last_block |=
+            instr->type == nir_instr_type_intrinsic &&
+            nir_instr_as_intrinsic(instr)->intrinsic ==
+               nir_intrinsic_sample_mask_agx;
+      }
+      EXPECT_TRUE(kill_in_last_block) << s;
+      ralloc_free(nir);
+   }
 }
 
 TEST_F(DemoteEarlyKill, GuardedQuadOperationsAllowEarlyKill)
