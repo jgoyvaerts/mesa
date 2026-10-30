@@ -731,6 +731,15 @@ if with_tests
   )
 
   executable(
+    'aurora-geomfrag',
+    files('tests/aurora_geomfrag.c'),
+    include_directories : [inc_include],
+    dependencies : [cc.find_library('vulkan'), cc.find_library('m')],
+    c_args : [c_msvc_compat_args],
+    gnu_symbol_visibility : 'hidden',
+  )
+
+  executable(
     'aurora-restart-switch',
     files('tests/aurora_restart_switch.c'),
     include_directories : [inc_include],
