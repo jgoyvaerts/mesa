@@ -342,6 +342,16 @@ if with_tests
   )
 
   test(
+    'hk_g17p_restart_state',
+    executable(
+      'hk_g17p_restart_state_test',
+      files('tests/test-hk-g17p-restart-state.c'),
+      include_directories : [include_directories('.')],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'hk_g17p_metadata_grid',
     executable(
       'hk_g17p_metadata_grid_test',
@@ -714,6 +724,15 @@ if with_tests
   executable(
     'vulkan-border-emulation-cache',
     files('tests/vulkan_border_emulation_cache.c'),
+    include_directories : [inc_include],
+    dependencies : [cc.find_library('vulkan')],
+    c_args : [c_msvc_compat_args],
+    gnu_symbol_visibility : 'hidden',
+  )
+
+  executable(
+    'aurora-restart-switch',
+    files('tests/aurora_restart_switch.c'),
     include_directories : [inc_include],
     dependencies : [cc.find_library('vulkan')],
     c_args : [c_msvc_compat_args],
