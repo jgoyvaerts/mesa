@@ -1155,6 +1155,9 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
    bool have_state = false;
    bool tessellation_state_seen = false;
    bool restart_seen = false;
+   /* A restart State Update persists until an indexed indirect packet writes
+    * its own: Honeykrisp re-emits it only when the restart index changes. */
+   bool restart_held = false;
    /* Cleared by every draw body, set by every barrier record.  A state
     * republication seen while this is false is a draw installing fresh VDM
     * pointers over the ones an earlier draw in this same stream may still be
@@ -1264,6 +1267,7 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
             if (restart_seen)
                return fail_at(cursor, "duplicate indexed restart record");
             restart_seen = true;
+            restart_held = true;
             cursor += 8;
             continue;
          }
@@ -1334,7 +1338,8 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
             : draw->index_size == AGX_VDM_INDEX_LIST_INDEX_SIZE_U16 ? 2
                                                                   : 4;
          const uint64_t bytes_needed = (uint64_t)draw->count * index_size;
-         if (!have_state || !restart_seen || bytes_needed > SIZE_MAX ||
+         if (!have_state || !(restart_seen || restart_held) ||
+             bytes_needed > SIZE_MAX ||
              !memory->owned(memory->data, draw->index_buffer,
                             (size_t)bytes_needed))
             return fail_at(cursor, "indexed draw buffer is not owned");
@@ -1407,6 +1412,7 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
          local.restart_enabled |= draw->restart_enable;
          local.restart_disabled |= !draw->restart_enable;
          local.indirect_indexed = true;
+         restart_held = false;
          cursor += record.length;
          break;
       }
