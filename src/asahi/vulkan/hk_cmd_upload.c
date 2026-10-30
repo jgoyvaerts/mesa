@@ -20,6 +20,42 @@ hk_pool_root_alloc(struct hk_cmd_buffer *cmd, uint32_t size,
    return hk_pool_alloc_from(cmd, &cmd->uploader.root, size, alignment,
                              HK_CMD_BO_ROOT);
 }
+/* ASAHI_MESA_DEBUG=perf: which classes of root fields a new upload
+ * changes, to tell why roots (and so vertex state publications) churn. */
+static void
+hk_root_diff_stats(struct hk_cmd_buffer *cmd, const void *old_root,
+                   const struct hk_root_descriptor_table *root, size_t head_B,
+                   size_t tail_B, size_t root_size)
+{
+   const uint8_t *a = old_root, *b = (const uint8_t *)root;
+   bool push = false, attrib = false, dynamic = false, sets = false,
+        other = false;
+   for (size_t i = 0; i < root_size; i++) {
+      if ((i >= head_B && i < tail_B) || a[i] == b[i] ||
+          i < sizeof(root->root_desc_addr))
+         continue;
+#define IN(field) (i >= hk_root_descriptor_offset(field) && \
+                   i < hk_root_descriptor_offset(field) + sizeof(root->field))
+      if (IN(push))
+         push = true;
+      else if (IN(draw.attrib_base) || IN(draw.attrib_clamps) ||
+               IN(draw.attrib_strides))
+         attrib = true;
+      else if (IN(dynamic_buffers))
+         dynamic = true;
+      else if (IN(sets))
+         sets = true;
+      else
+         other = true;
+#undef IN
+   }
+   hk_upload_stat(cmd, root_diff_push, push);
+   hk_upload_stat(cmd, root_diff_attrib, attrib);
+   hk_upload_stat(cmd, root_diff_dynamic, dynamic);
+   hk_upload_stat(cmd, root_diff_sets, sets);
+   hk_upload_stat(cmd, root_diff_other, other);
+}
+
 
 __attribute__((hot)) uint64_t
 hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
@@ -75,6 +111,11 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
       }
    }
 
+   if (unlikely(dev->dev.debug & AGX_DBG_PERF) && desc->uploaded_root.cpu &&
+       desc->uploaded_root_size == root_size)
+      hk_root_diff_stats(cmd, desc->uploaded_root.cpu, root, head_B, tail_B,
+                         root_size);
+
    struct agx_ptr root_ptr = hk_pool_root_alloc(cmd, root_size, 8);
    if (!root_ptr.gpu)
       return 0;
@@ -115,6 +156,7 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
    desc->uploaded_root = root_ptr;
    desc->uploaded_root_size = root_size;
    desc->uploaded_root_generation = desc->generation;
+   desc->uploaded_push_generation = desc->push_generation;
    desc->uploaded_dynamic_buffer_end = desc->dynamic_buffer_end;
    hk_upload_stat(cmd, root_uploads, 1);
    hk_upload_stat(cmd, root_bytes, head_B + (tail_B < root_size ? root_size - tail_B : 0));
@@ -154,7 +196,10 @@ hk_cmd_upload_draw_params(struct hk_cmd_buffer *cmd, uint32_t first,
                           uint32_t first_instance)
 {
    struct hk_graphics_state *gfx = &cmd->state.gfx;
-   uint32_t params[] = {first, first_instance};
+   /* A draw-parameter table shader also loads a zero mode word after them
+    * (hk_g17p_draw_table.h). [2] is not uploaded otherwise, only compared. */
+   const bool table = hk_g17p_draw_table_bound(gfx);
+   uint32_t params[] = {first, first_instance, table ? 0 : UINT32_MAX};
    if (agx_native_graphics(&hk_cmd_buffer_device(cmd)->dev) &&
        gfx->g17p_draw_params_host_valid && gfx->draw_params &&
        memcmp(gfx->g17p_draw_params_value, params, sizeof(params)) == 0) {
@@ -162,7 +207,8 @@ hk_cmd_upload_draw_params(struct hk_cmd_buffer *cmd, uint32_t first,
       return;
    }
 
-   const uint64_t addr = hk_pool_upload(cmd, params, sizeof(params), 4);
+   const uint64_t addr =
+      hk_pool_upload(cmd, params, table ? 12 : 8, 4);
    gfx->g17p_draw_params_host_valid = addr != 0;
    gfx->draw_params = addr;
    if (!addr)
@@ -202,10 +248,17 @@ hk_cmd_print_upload_stats(struct hk_cmd_buffer *cmd)
               " root=%" PRIu64 "/%" PRIu64 "B root_reuse=%" PRIu64
               " draw_params=%" PRIu64 "/%" PRIu64 "B draw_param_reuse=%" PRIu64
               " draw_id=%" PRIu64 "/%" PRIu64 "B draw_id_reuse=%" PRIu64
-              " constants=%" PRIu64 "/%" PRIu64 "B constant_reuse=%" PRIu64,
+              " constants=%" PRIu64 "/%" PRIu64 "B constant_reuse=%" PRIu64
+              " root_diff=push:%" PRIu64 ",attrib:%" PRIu64 ",dynamic:%" PRIu64
+              ",sets:%" PRIu64 ",other:%" PRIu64
+              " vs_publications=%" PRIu64 " draw_table_slots=%" PRIu64
+              " unread_push_skips=%" PRIu64,
               s->draws, s->descriptor_binds, s->descriptor_noops,
               s->root_uploads, s->root_bytes, s->root_reuses,
               s->draw_param_uploads, s->draw_param_bytes, s->draw_param_reuses,
               s->draw_id_uploads, s->draw_id_bytes, s->draw_id_reuses,
-              s->constant_uploads, s->constant_bytes, s->constant_reuses);
+              s->constant_uploads, s->constant_bytes, s->constant_reuses,
+              s->root_diff_push, s->root_diff_attrib, s->root_diff_dynamic,
+              s->root_diff_sets, s->root_diff_other, s->vs_publications,
+              s->draw_table_slots, s->root_unread_push_skips);
 }

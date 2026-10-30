@@ -16,6 +16,8 @@
 #include "asahi/compiler/agx_nir_m5_mesh.h"
 #include "asahi/compiler/agx3_mesh_core.h"
 #include "hk_nir_sampler_bias.h"
+#include "hk_g17p_draw_table.h"
+#include "hk_root_push_mask.h"
 #include "hk_gen1_rt_indirect_contract.h"
 #include "asahi/compiler/agx_nir_m5_mesh.h"
 #include "asahi/compiler/agx3_mesh_core.h"
@@ -3808,6 +3810,59 @@ hk_nir_root_use_reads(nir_src *use)
    return reads;
 }
 
+/* hk_shader_info::agx3_push_read_mask: the push dwords of every constant
+ * offset root load, all of them for any other use of the root address. */
+static uint64_t
+hk_nir_push_read_mask(const nir_shader *nir)
+{
+   const uint64_t push = hk_root_descriptor_offset(push);
+   uint64_t mask = 0;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic ||
+                nir_instr_as_intrinsic(instr)->intrinsic !=
+                   nir_intrinsic_load_root_agx)
+               continue;
+
+            nir_foreach_use_including_if(use,
+                                         &nir_instr_as_intrinsic(instr)->def) {
+               if (nir_src_is_if(use) ||
+                   nir_src_use_instr(use)->type != nir_instr_type_alu)
+                  return ~UINT64_C(0);
+               nir_alu_instr *add = nir_instr_as_alu(nir_src_use_instr(use));
+               uint64_t offset;
+               const unsigned other = use == &add->src[0].src ? 1 : 0;
+               if (add->op != nir_op_iadd ||
+                   !hk_nir_constant_offset(
+                      nir_get_scalar(add->src[other].src.ssa,
+                                     add->src[other].swizzle[0]),
+                      8, &offset))
+                  return ~UINT64_C(0);
+               nir_foreach_use_including_if(load_use, &add->def) {
+                  if (nir_src_is_if(load_use) ||
+                      nir_src_use_instr(load_use)->type !=
+                         nir_instr_type_intrinsic)
+                     return ~UINT64_C(0);
+                  nir_intrinsic_instr *load =
+                     nir_instr_as_intrinsic(nir_src_use_instr(load_use));
+                  if ((load->intrinsic != nir_intrinsic_load_global_constant &&
+                       load->intrinsic != nir_intrinsic_load_global) ||
+                      load_use != &load->src[0])
+                     return ~UINT64_C(0);
+                  const uint64_t end =
+                     offset + load->def.num_components * load->def.bit_size / 8;
+                  if (end > push && offset < push + HK_MAX_PUSH_SIZE)
+                     mask |= hk_push_dwords(offset > push ? offset - push : 0,
+                                            end - push);
+               }
+            }
+         }
+      }
+   }
+   return mask;
+}
+
 /* hk_shader_info::agx3_root_reads, gathered where hk_nir_uses_root() is. */
 static uint8_t
 hk_nir_root_reads(const nir_shader *nir)
@@ -4917,6 +4972,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    if (agx_native_graphics(&dev->dev) || agx_chip_g17_m5(dev->dev.chip)) {
       shader->info.agx3_uses_root = hk_nir_uses_root(nir);
       shader->info.agx3_root_reads = hk_nir_root_reads(nir);
+      shader->info.agx3_push_read_mask = hk_nir_push_read_mask(nir);
    }
 
    /* Measure while root markers are still explicit. Uniform lowering loads
@@ -5820,6 +5876,114 @@ hk_m5_mesh_passthrough_linked(struct hk_shader *object)
    object->only_linked->b.g17p_compiler_d = 1;
 }
 
+static bool
+hk_nir_reads_vertex_id(nir_shader *s)
+{
+   nir_foreach_function_impl(impl, s) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_intrinsic &&
+                nir_instr_as_intrinsic(instr)->intrinsic ==
+                   nir_intrinsic_load_vertex_id)
+               return true;
+         }
+      }
+   }
+   return false;
+}
+
+/* G17P draw-parameter table (hk_g17p_draw_table.h): with a nonzero mode
+ * word, read base vertex and base instance from the table entry of the
+ * draw's slot and decode the vertex index. Runs on a monolithic hardware vertex shader after its
+ * vertex fetch and system values are uniforms. Returns false, changing
+ * nothing, for a shader without base parameters or with gl_DrawID (whose
+ * uniform follows them). */
+static bool
+hk_g17p_lower_draw_table(nir_shader *s, unsigned uniform_base, unsigned nr)
+{
+   const unsigned fv = uniform_base + AGX_ABI_VUNI_FIRST_VERTEX(nr);
+   const unsigned bi = uniform_base + AGX_ABI_VUNI_BASE_INSTANCE(nr);
+   const unsigned draw_id = uniform_base + AGX_ABI_VUNI_DRAW_ID(nr);
+   nir_function_impl *impl = nir_shader_get_entrypoint(s);
+
+   /* Fetches of attributes nothing reads can still be in the shader, with
+    * uniforms that overlap these (their slots are counted without them). */
+   NIR_PASS(_, s, nir_opt_dce);
+
+   bool base_params = false;
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         /* gl_DrawID takes the uniform the mode word uses. */
+         if (intr->intrinsic == nir_intrinsic_load_draw_id)
+            return false;
+         if (intr->intrinsic != nir_intrinsic_load_preamble)
+            continue;
+         const unsigned base = nir_intrinsic_base(intr);
+         const unsigned end =
+            base + intr->def.num_components * intr->def.bit_size / 16;
+         if (end <= fv || base >= draw_id + 2)
+            continue;
+         /* Only the 32-bit parameters themselves may live here. */
+         if (base == draw_id || (base != fv && base != bi) ||
+             intr->def.bit_size != 32 || intr->def.num_components != 1)
+            return false;
+         base_params = true;
+      }
+   }
+   if (!base_params)
+      return false;
+
+   /* Build the decode first; it loads the same uniforms and the raw index,
+    * which the rewrite below skips. */
+   nir_builder b = nir_builder_at(nir_before_impl(impl));
+   nir_def *lo = nir_load_preamble(&b, 1, 32, .base = fv);
+   nir_def *hi = nir_load_preamble(&b, 1, 32, .base = bi);
+   nir_def *raw = nir_load_vertex_id(&b);
+   /* Mode word: 0, or the shift of the slot. Everything below but the
+    * branch depends on the raw index, so nothing joins a constant program. */
+   nir_def *shift = nir_load_preamble(&b, 1, 32, .base = draw_id);
+   nir_push_if(&b, nir_ine_imm(&b, shift, 0));
+   nir_def *slot = nir_ushr(&b, raw, shift);
+   nir_def *entry = nir_load_global_constant(
+      &b, 2, 32,
+      nir_pack_64_2x32_split(&b, nir_iadd(&b, lo, nir_ishl_imm(&b, slot, 3)),
+                             hi),
+      .align_mul = 8);
+   nir_def *entry_first = nir_channel(&b, entry, 0);
+   nir_def *entry_instance = nir_channel(&b, entry, 1);
+   nir_def *table_vid = nir_iadd(
+      &b, nir_isub(&b, raw, nir_ishl(&b, slot, shift)), entry_first);
+   nir_pop_if(&b, NULL);
+   nir_def *vertex_id = nir_if_phi(&b, table_vid, raw);
+   nir_def *values[] = {nir_if_phi(&b, entry_first, lo),
+                        nir_if_phi(&b, entry_instance, hi)};
+
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr_safe(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (&intr->def == lo || &intr->def == hi || &intr->def == raw ||
+             &intr->def == shift)
+            continue;
+         nir_def *value = NULL;
+         if (intr->intrinsic == nir_intrinsic_load_vertex_id)
+            value = vertex_id;
+         else if (intr->intrinsic == nir_intrinsic_load_preamble &&
+                  (nir_intrinsic_base(intr) == fv ||
+                   nir_intrinsic_base(intr) == bi))
+            value = values[nir_intrinsic_base(intr) == bi];
+         if (value)
+            nir_def_replace(&intr->def, value);
+      }
+   }
+   nir_progress(true, impl, nir_metadata_none);
+   return true;
+}
+
 static VkResult
 hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *info,
                   const struct vk_graphics_pipeline_state *state,
@@ -6559,6 +6723,8 @@ hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *inf
                         : AGX_ROBUSTNESS_DISABLED,
                };
 
+               /* Before vertex fetch reads the index too. */
+               const bool reads_vertex_index = hk_nir_reads_vertex_id(clone);
                if (agx_native_graphics(&dev->dev) ||
                    agx_chip_g17_m5(dev->dev.chip))
                   agx_nir_lower_vbo_raw(clone, attribs, agx_rs,
@@ -6577,6 +6743,12 @@ hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *inf
                   hk_nir_has_m5_native_query(dev, clone);
                agx_nir_lower_non_monolithic_uniforms_at(clone, nr,
                                                         query_prefix ? 168 : 0);
+               if (hw && agx_native_graphics(&dev->dev) &&
+                   !debug_get_bool_option("HK_NO_DRAW_TABLE", false)) {
+                  shader->info.g17p_reads_vertex_index = reads_vertex_index;
+                  shader->info.g17p_draw_table = hk_g17p_lower_draw_table(
+                     clone, query_prefix ? 168 : 0, nr);
+               }
             }
          }
 
@@ -6593,6 +6765,10 @@ hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *inf
             return result;
          }
          shader->info.vs.covers_clip_square = vs_covers_clip_square;
+         /* The table pointer is published through the draw-parameter
+          * uniforms, whatever the compiler still sees of them. */
+         if (shader->info.g17p_draw_table)
+            shader->b.info.uses_base_param = true;
       }
    } else if (sample_variants) {
       /* The sample count is dynamic API state, but native coverage words and

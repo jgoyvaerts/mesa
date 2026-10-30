@@ -162,6 +162,14 @@ struct hk_shader_info {
    bool agx3_gen1_fragment_rq;
    /* HK_ROOT_READS_* classes of root bytes the shader may read. */
    uint8_t agx3_root_reads;
+   /* Push constant dwords the shader may read (hk_root_push_mask.h). */
+   uint64_t agx3_push_read_mask;
+   /* G17P hardware vertex shader: base vertex/instance come through the
+    * draw-parameter table (hk_g17p_draw_table.h); it reads gl_VertexIndex
+    * itself, not only for vertex fetch. Outside the stage union: a
+    * tessellation evaluation shader is a hardware vertex program too. */
+   bool g17p_draw_table;
+   bool g17p_reads_vertex_index;
    /* Actual uniform address selected after stage and resource lowering. */
    unsigned agx3_root_uniform;
    bool agx3_txf_texture_valid;
