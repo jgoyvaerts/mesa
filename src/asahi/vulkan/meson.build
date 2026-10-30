@@ -730,6 +730,15 @@ if with_tests
   )
 
   executable(
+    'aurora-emrt-bench',
+    files('tests/vulkan_emrt_bench.c'),
+    include_directories : [inc_include],
+    dependencies : [cc.find_library('vulkan')],
+    c_args : [c_msvc_compat_args],
+    gnu_symbol_visibility : 'hidden',
+  )
+
+  executable(
     'g17p-vulkan-multiview-clear',
     files('tests/g17p_vulkan_multiview_clear.c'),
     include_directories : [inc_include],
