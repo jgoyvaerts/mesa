@@ -35,6 +35,7 @@
 #include "hk_conditional_render_core.h"
 #include "hk_shader.h"
 #include "hk_sync.h"
+#include "hk_tess_batch.h"
 
 #include "hk_cmd_pool.h"
 #include "hk_cs_root_size.h"
@@ -1672,6 +1673,9 @@ struct hk_cmd_buffer {
       struct hk_cs *post_gfx;
    } current_cs;
 
+   /* Tessellation stages of the current render's draws, not yet in pre_gfx */
+   struct hk_tess_batch tess_batch;
+
    /* Recorded dependencies between control streams, see hk_sync.h. */
    struct hk_sync_state sync;
 
@@ -2133,6 +2137,38 @@ hk_take_deferred_clears(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
 
 void hk_flush_query_resets(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
 
+/* A control stream outside the command buffer's list of streams. */
+static inline struct hk_cs *
+hk_cs_create(struct hk_cmd_buffer *cmd, bool compute)
+{
+   /* Allocate root control stream */
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   size_t initial_size = hk_cs_root_size(dev->dev.chip, compute);
+   struct agx_ptr root = hk_pool_cs_alloc(cmd, initial_size, 1024);
+   if (!root.cpu)
+      return NULL;
+
+   /* Allocate hk_cs for the new stream */
+   struct hk_cs *cs = malloc(sizeof(*cs));
+   *cs = (struct hk_cs){
+      .cmd = cmd,
+      .type = compute ? HK_CS_CDM : HK_CS_VDM,
+      .addr = root.gpu,
+      .start = root.cpu,
+      .chunk = root,
+      .current = root.cpu,
+      .end = root.cpu + initial_size,
+   };
+
+   util_dynarray_init(&cs->compute_resources, NULL);
+   util_dynarray_init(&cs->render_resources, NULL);
+   list_inithead(&cs->node);
+   hk_drm_attachment_set_init(&cs->compute_attachments);
+   /* Only known meta destinations are collected so far. */
+   cs->compute_attachments.complete = false;
+   return cs;
+}
+
 static inline struct hk_cs *
 hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
                              bool compute)
@@ -2159,32 +2195,17 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
         (hk_sync_general_cs_kind(cmd) & ~(*ptr)->sync.kind)))
       hk_sync_check_cs(cmd);
 
+   /* Work for the pre-graphics stream follows the batched tessellation of the
+    * draws recorded before it. */
+   if (ptr == &cmd->current_cs.pre_gfx && cmd->tess_batch.draws &&
+       !cmd->tess_batch.recording)
+      hk_tess_batch_flush(cmd);
+
    if ((*ptr) == NULL) {
-      /* Allocate root control stream */
       struct hk_device *dev = hk_cmd_buffer_device(cmd);
-      size_t initial_size = hk_cs_root_size(dev->dev.chip, compute);
-      struct agx_ptr root = hk_pool_cs_alloc(cmd, initial_size, 1024);
-      if (!root.cpu)
+      struct hk_cs *cs = hk_cs_create(cmd, compute);
+      if (!cs)
          return NULL;
-
-      /* Allocate hk_cs for the new stream */
-      struct hk_cs *cs = malloc(sizeof(*cs));
-      *cs = (struct hk_cs){
-         .cmd = cmd,
-         .type = compute ? HK_CS_CDM : HK_CS_VDM,
-         .addr = root.gpu,
-         .start = root.cpu,
-         .chunk = root,
-         .current = root.cpu,
-         .end = root.cpu + initial_size,
-      };
-
-      util_dynarray_init(&cs->compute_resources, NULL);
-      util_dynarray_init(&cs->render_resources, NULL);
-      list_inithead(&cs->node);
-      hk_drm_attachment_set_init(&cs->compute_attachments);
-      /* Only known meta destinations are collected so far. */
-      cs->compute_attachments.complete = false;
 
       bool before_gfx = (ptr == &cmd->current_cs.pre_gfx);
 
@@ -2339,6 +2360,8 @@ bool hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd);
 static bool
 hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
 {
+   hk_tess_batch_flush(cmd);
+
    struct hk_cs *cs = cmd->current_cs.gfx;
 
    if (cs && cs->stats.cmds == 0 && hk_optimize_empty_vdm(cmd))
