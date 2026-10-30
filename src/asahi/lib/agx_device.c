@@ -12,6 +12,9 @@
 #include "agx3_code_container_core.h"
 #include "agx_va_runtime_hole.h"
 #include <errno.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <time.h>
 #include <stdlib.h>
 #include <inttypes.h>
 #include "clc/asahi_clc.h"
@@ -21,6 +24,8 @@
 #include "util/ralloc.h"
 #include "util/timespec.h"
 #include "util/u_debug.h"
+#include "util/os_misc.h"
+#include "util/log.h"
 #include "agx_abi.h"
 #include "agx_bo.h"
 #include "agx_compile.h"
@@ -120,9 +125,28 @@ static const struct debug_named_value agx_debug_options[] = {
 /* clang-format on */
 
 void
+agx_bo_trace_line(struct agx_device *dev, const char *fmt, ...)
+{
+   struct timespec now;
+   clock_gettime(CLOCK_MONOTONIC, &now);
+   char line[256];
+   va_list args;
+   va_start(args, fmt);
+   vsnprintf(line, sizeof(line), fmt, args);
+   va_end(args);
+   /* One write per line, so lines from different threads never interleave. */
+   fprintf(dev->bo_trace, "%" PRIu64 " %s\n",
+           (uint64_t)now.tv_sec * UINT64_C(1000000000) + (uint64_t)now.tv_nsec, line);
+}
+
+void
 agx_bo_free(struct agx_device *dev, struct agx_bo *bo)
 {
    const uint64_t handle = bo->handle;
+
+   agx_bo_trace(dev, "D handle=%u va=%#" PRIx64 " size=%#zx label=%s",
+                bo->uapi_handle, bo->va ? bo->va->addr : 0, bo->size,
+                bo->label ? bo->label : "-");
 
    if (bo->_map)
       dev->ops.bo_munmap(dev, bo);
@@ -209,6 +233,12 @@ agx_drm_bo_bind(struct agx_device *dev, struct drm_asahi_gem_bind_op *ops,
    };
 
    int ret = drmIoctl(dev->fd, DRM_IOCTL_ASAHI_VM_BIND, &vm_bind);
+   for (uint32_t i = 0; dev->bo_trace && i < count; ++i) {
+      agx_bo_trace(dev, "%c addr=%#llx range=%#llx handle=%u offset=%#llx flags=%#x ret=%d",
+                   (ops[i].flags & DRM_ASAHI_BIND_UNBIND) ? 'U' : 'B',
+                   (unsigned long long)ops[i].addr, (unsigned long long)ops[i].range,
+                   ops[i].handle, (unsigned long long)ops[i].offset, ops[i].flags, ret);
+   }
    if (ret) {
       const int saved_errno = errno;
       fprintf(stderr, "DRM_IOCTL_ASAHI_VM_BIND failed: %s (vm=%u, ops=%u)",
@@ -846,6 +876,15 @@ agx_open_device(void *memctx, struct agx_device *dev)
    dev->debug =
       debug_get_flags_option("ASAHI_MESA_DEBUG", agx_debug_options, 0);
 
+   const char *bo_trace = os_get_option("AGX_BO_TRACE");
+   if (bo_trace && *bo_trace) {
+      dev->bo_trace = fopen(bo_trace, "a");
+      if (dev->bo_trace)
+         setvbuf(dev->bo_trace, NULL, _IOLBF, 0);
+      else
+         mesa_logw("AGX_BO_TRACE: cannot open %s", bo_trace);
+   }
+
    ssize_t params_size = -1;
 
    /* A backend with preset operations has already identified its device. */
@@ -1472,6 +1511,10 @@ agx_close_device(struct agx_device *dev)
 
    close(dev->fd);
    dev->fd = -1;
+   if (dev->bo_trace) {
+      fclose(dev->bo_trace);
+      dev->bo_trace = NULL;
+   }
 }
 
 uint32_t
