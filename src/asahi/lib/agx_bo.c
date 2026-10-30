@@ -683,6 +683,9 @@ agx_bo_create(struct agx_device *dev, size_t size, unsigned align,
 
    bo->label = label;
    p_atomic_set(&bo->refcnt, 1);
+   agx_bo_trace(dev, "C handle=%u va=%#" PRIx64 " size=%#zx flags=%#x reused=%d label=%s",
+                bo->uapi_handle, bo->va ? bo->va->addr : 0, bo->size, flags, reused,
+                label ? label : "-");
 
    if (dev->debug &
        (AGX_DBG_TRACE | AGX_DBG_ASYNCTRACE)) {

@@ -6,10 +6,12 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdio.h>
 #ifdef HAVE_LIBDRM
 #include <xf86drm.h>
 #endif
 #include "drm-uapi/asahi_drm.h"
+#include "util/macros.h"
 #include "util/ralloc.h"
 #include "util/cnd_monotonic.h"
 #include "util/u_thread.h"
@@ -142,6 +144,15 @@ int asahi_simple_ioctl(struct agx_device *dev, unsigned cmd, void *req);
 void agx_drm_bo_munmap(struct agx_device *dev, struct agx_bo *bo);
 void agx_drm_bo_close(struct agx_device *dev, uint32_t handle);
 
+struct agx_device;
+/* Writes one AGX_BO_TRACE line, prefixed with CLOCK_MONOTONIC nanoseconds. */
+void agx_bo_trace_line(struct agx_device *dev, const char *fmt, ...) PRINTFLIKE(2, 3);
+#define agx_bo_trace(dev, ...)                                                 \
+   do {                                                                        \
+      if (unlikely((dev)->bo_trace))                                          \
+         agx_bo_trace_line((dev), __VA_ARGS__);                                \
+   } while (0)
+
 struct agx_device {
    /* Optional allocator for linked executables: returns a referenced BO with
     * the allocation at *offset. Without it, each program gets its own BO. */
@@ -149,6 +160,11 @@ struct agx_device {
                                 uint32_t *offset);
 
    uint32_t debug;
+
+   /* AGX_BO_TRACE=<path>: one line per GPU VA bind/unbind and per BO create/free, with
+    * CLOCK_MONOTONIC times, so a kernel-reported fault address can be matched to a buffer and
+    * its lifetime. NULL unless set. */
+   FILE *bo_trace;
 
    /* Precompiled libagx binary table */
    const uint32_t **libagx_programs;
