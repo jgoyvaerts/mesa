@@ -19,7 +19,11 @@
  * discards a quarter of the fragments. `cull=1` culls every triangle after
  * vertex shading (front-and-back culling): the vertex work alone.
  * `pcvary=1` changes the push constants of every draw (new root and vertex
- * state per draw, as games that update per-object constants).
+ * state per draw, as games that update per-object constants); no shader
+ * reads that value. `pcvary=2` also changes one the vertex shader reads (a
+ * depth offset below the check's tolerance). `inst=1` adds
+ * an instance-rate attribute (a depth offset, binding 1) and gives every draw
+ * its own firstInstance, as a game drawing per-object instance data does.
  *
  * Each timed pass is one submit; the min/median/max wall time of `reps` passes
  * is printed. Run with HK_FRAME_ANATOMY=<file> HK_FRAME_ANATOMY_EVERY=1 for
@@ -27,7 +31,7 @@
  *
  * Usage: aurora-geomfrag shadow|gbuf [tris=N] [draws=N] [cover=F] [layers=N]
  *        [vcost=N] [fcost=N] [samples=1|2] [bias=0|1] [dstore=0|1] [reps=N]
- *        [discard=0|1] [cull=0|1] [pcvary=0|1]
+ *        [discard=0|1] [cull=0|1] [pcvary=0|1] [inst=0|1]
  * Exit status 0 = correct output (depth and colour checked at the centre and
  * in the corner, which only cover=1 draws).
  */
@@ -141,7 +145,7 @@ int main(int argc, char **argv) {
   const bool gbuf = !strcmp(argv[1], "gbuf");
   unsigned tris = 1 << 20, draws = 500, layers = 1, vcost = 0, fcost = 0;
   unsigned samples = 1, bias = 0, dstore = 1, reps = 7, discard = 0, cull = 0;
-  unsigned pcvary = 0;
+  unsigned pcvary = 0, inst = 0;
   double cover = 1.0;
   for (int i = 2; i < argc; i++) {
     char *eq = strchr(argv[i], '=');
@@ -165,6 +169,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(k, "discard")) discard = v;
     else if (!strcmp(k, "cull")) cull = v;
     else if (!strcmp(k, "pcvary")) pcvary = v;
+    else if (!strcmp(k, "inst")) inst = v;
     else {
       fprintf(stderr, "unknown key %s\n", k);
       return 2;
@@ -177,16 +182,16 @@ int main(int argc, char **argv) {
   }
   const uint32_t W = gbuf ? 3456 : 4096, H = gbuf ? 2234 : 4096;
 
-  VkInstance inst;
+  VkInstance instance;
   CHECK(vkCreateInstance(
      &(VkInstanceCreateInfo){
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pApplicationInfo = &(VkApplicationInfo){
            .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
            .apiVersion = VK_API_VERSION_1_3}},
-     NULL, &inst));
+     NULL, &instance));
   uint32_t n = 1;
-  CHECK(vkEnumeratePhysicalDevices(inst, &n, &pdev));
+  CHECK(vkEnumeratePhysicalDevices(instance, &n, &pdev));
   if (!n) {
     fprintf(stderr, "no device\n");
     return 2;
@@ -272,11 +277,20 @@ int main(int argc, char **argv) {
                         : cimg[0];
 
   VkShaderModule vs, fs, dfs;
+  /* inst=1: draw d's instance is firstInstance d, depth offset inst_dz(d). */
+#define INST_DZ(d) (1e-5f * ((d) % 16))
+  float *inst_map;
+  VkBuffer instbuf = host_buffer((VkDeviceSize)draws * 4,
+                                 VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                 (void **)&inst_map);
+  for (unsigned d = 0; d < draws; d++)
+    inst_map[d] = INST_DZ(d);
   CHECK(vkCreateShaderModule(
      dev,
      &(VkShaderModuleCreateInfo){
         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-        .codeSize = sizeof(geomfrag_vert), .pCode = geomfrag_vert},
+        .codeSize = inst ? sizeof(geomfrag_inst_vert) : sizeof(geomfrag_vert),
+        .pCode = inst ? geomfrag_inst_vert : geomfrag_vert},
      NULL, &vs));
   CHECK(vkCreateShaderModule(
      dev,
@@ -323,14 +337,16 @@ int main(int argc, char **argv) {
             .pName = "main"}},
         .pVertexInputState = &(VkPipelineVertexInputStateCreateInfo){
            .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-           .vertexBindingDescriptionCount = 1,
-           .pVertexBindingDescriptions = &(VkVertexInputBindingDescription){
-              0, 32, VK_VERTEX_INPUT_RATE_VERTEX},
-           .vertexAttributeDescriptionCount = 3,
+           .vertexBindingDescriptionCount = inst ? 2 : 1,
+           .pVertexBindingDescriptions = (VkVertexInputBindingDescription[]){
+              {0, 32, VK_VERTEX_INPUT_RATE_VERTEX},
+              {1, 4, VK_VERTEX_INPUT_RATE_INSTANCE}},
+           .vertexAttributeDescriptionCount = inst ? 4 : 3,
            .pVertexAttributeDescriptions = (VkVertexInputAttributeDescription[]){
               {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},
               {1, 0, VK_FORMAT_R32G32B32_SFLOAT, 12},
-              {2, 0, VK_FORMAT_R32G32_SFLOAT, 24}}},
+              {2, 0, VK_FORMAT_R32G32_SFLOAT, 24},
+              {3, 1, VK_FORMAT_R32_SFLOAT, 0}}},
         .pInputAssemblyState = &(VkPipelineInputAssemblyStateCreateInfo){
            .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
            .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST},
@@ -458,13 +474,15 @@ int main(int argc, char **argv) {
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
     vkCmdSetViewport(cb, 0, 1, &(VkViewport){0, 0, W, H, 0, 1});
     vkCmdSetScissor(cb, 0, 1, &(VkRect2D){{0, 0}, {W, H}});
-    vkCmdBindVertexBuffers(cb, 0, 1, &vbuf, &(VkDeviceSize){0});
+    vkCmdBindVertexBuffers(cb, 0, inst ? 2 : 1, (VkBuffer[]){vbuf, instbuf},
+                           (VkDeviceSize[]){0, 0});
     vkCmdBindIndexBuffer(cb, ibuf, 0, VK_INDEX_TYPE_UINT32);
     /* Centred, back to front: layer l at z offset -0.1 * l / layers. */
     for (unsigned l = 0; l < layers; l++) {
       for (unsigned d = 0; d < draws; d++) {
         struct pc pc = {{-cover, -cover, 2 * cover, 2 * cover},
-                        -0.1f * l / layers, vcost, fcost,
+                        -0.1f * l / layers + (pcvary > 1 ? 1e-9f * d : 0),
+                        vcost, fcost,
                         pcvary ? l * draws + d : 0};
         vkCmdPushConstants(cb, pl,
                            VK_SHADER_STAGE_VERTEX_BIT |
@@ -472,7 +490,7 @@ int main(int argc, char **argv) {
                            0, sizeof(pc), &pc);
         const unsigned q0 = (uint64_t)nquads * d / draws;
         const unsigned q1 = (uint64_t)nquads * (d + 1) / draws;
-        vkCmdDrawIndexed(cb, (q1 - q0) * 6, 1, q0 * 6, 0, 0);
+        vkCmdDrawIndexed(cb, (q1 - q0) * 6, 1, q0 * 6, 0, inst ? d : 0);
       }
     }
     vkCmdEndRendering(cb);
@@ -510,7 +528,16 @@ int main(int argc, char **argv) {
                .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
                .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT}});
-  const int32_t px[2][2] = {{W / 2, H / 2}, {0, 0}};
+  /* inst=1 probes the middle of the centre quad, whose draw is known. */
+  const unsigned qc = (g / 2) * g + g / 2;
+  unsigned dc = 0;
+  while ((uint64_t)nquads * (dc + 1) / draws <= qc)
+    dc++;
+  const double qmid = -cover + 2 * cover * (g / 2 + 0.5) / g;
+  const int32_t px[2][2] = {
+     {inst ? (int32_t)((qmid + 1) / 2 * W) : (int32_t)W / 2,
+      inst ? (int32_t)((qmid + 1) / 2 * H) : (int32_t)H / 2},
+     {0, 0}};
   for (unsigned i = 0; i < 2; i++) {
     vkCmdCopyImageToBuffer(
        cb, zres, VK_IMAGE_LAYOUT_GENERAL, rb, 1,
@@ -536,8 +563,11 @@ int main(int argc, char **argv) {
    * pushes it back by a small amount. */
   const float zfront = 0.5f - 0.1f * (layers - 1) / layers;
   const bool corner_drawn = cover >= 1.0;
-  bool ok = z[0] >= zfront - 1e-6f && z[0] <= zfront + (bias ? 1e-3f : 1e-6f) &&
-            (corner_drawn ? z[1] == z[0] : z[1] == 1.0f);
+  /* The corner is draw 0's, whose instance offset is 0. */
+  const float zc = zfront + (inst ? INST_DZ(dc) : 0);
+  bool ok = z[0] >= zc - 1e-6f && z[0] <= zc + (bias ? 1e-3f : 1e-6f) &&
+            (corner_drawn ? fabsf(z[1] - zfront) <= (bias ? 1e-3f : 1e-6f)
+                          : z[1] == 1.0f);
   if (gbuf)
     ok = ok && (c[0] >> 16) == 0xffff && (c[0] & 0xff) - 0x7fu <= 1 &&
          ((c[0] >> 8) & 0xff) - 0x7fu <= 1 && c[1] == (corner_drawn ? c[0] : 0);
@@ -545,16 +575,16 @@ int main(int argc, char **argv) {
     ok = z[0] == 1.0f && z[1] == 1.0f && (!gbuf || (c[0] == 0 && c[1] == 0));
   if (!ok)
     fprintf(stderr, "readback: z %f %f (expected %f, 1), c0 %08x %08x\n", z[0],
-            z[1], zfront, gbuf ? c[0] : 0, gbuf ? c[1] : 0);
+            z[1], zc, gbuf ? c[0] : 0, gbuf ? c[1] : 0);
 
   double sorted[256];
   memcpy(sorted, ms_pass, nt * sizeof(double));
   qsort(sorted, nt, sizeof(double), cmp_double);
   printf("%s %ux%u@%u tris=%u draws=%u cover=%.3f layers=%u vcost=%u fcost=%u "
-         "bias=%u dstore=%u discard=%u cull=%u pcvary=%u tri_px=%.2f: wall ms min %.3f med %.3f max %.3f "
+         "bias=%u dstore=%u discard=%u cull=%u pcvary=%u inst=%u tri_px=%.2f: wall ms min %.3f med %.3f max %.3f "
          "(%u passes)\n",
          argv[1], W, H, samples, nquads * 2, draws, cover, layers, vcost, fcost,
-         bias, dstore, discard, cull, pcvary, cover * cover * W * H / (nquads * 2.0), sorted[0],
+         bias, dstore, discard, cull, pcvary, inst, cover * cover * W * H / (nquads * 2.0), sorted[0],
          sorted[nt / 2], sorted[nt - 1], nt);
   printf(ok ? "PASS\n" : "FAIL\n");
   return ok ? 0 : 1;
