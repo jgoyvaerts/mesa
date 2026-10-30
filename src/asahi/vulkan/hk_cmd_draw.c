@@ -47,6 +47,7 @@
 #include "hk_g17p_draw_state_upload.h"
 #include "hk_agx3_vdm_decode.h"
 #include "hk_g17p_restart_state.h"
+#include "hk_root_push_mask.h"
 #include "hk_physical_device.h"
 #include "hk_private.h"
 #include "asahi/lib/agx_m5_va.h"
@@ -98,6 +99,7 @@
 /* Diagnostic controls, read once: these are consulted per draw or
  * render pass, and an uncached getenv() scans the whole environment. */
 DEBUG_GET_ONCE_BOOL_OPTION(m5_launch_debug, "ASAHI_M5_LAUNCH_DEBUG", false)
+DEBUG_GET_ONCE_BOOL_OPTION(no_push_filter, "HK_NO_PUSH_FILTER", false)
 DEBUG_GET_ONCE_BOOL_OPTION(m5_msaa_pass_merge, "ASAHI_M5_MSAA_PASS_MERGE", true)
 DEBUG_GET_ONCE_BOOL_OPTION(m5_verify_tile_loader, "AGX_M5_VERIFY_TILE_LOADER",
                            false)
@@ -143,6 +145,8 @@ static uint64_t hk_upload_geometry_params(struct hk_cmd_buffer *cmd,
                                           struct agx_draw draw);
 static void hk_init_tess_params(struct hk_cmd_buffer *cmd,
                                 struct poly_tess_params *out);
+static void hk_g17p_draw_table_publish(struct hk_cmd_buffer *cmd,
+                                       struct hk_cs *cs);
 static void hk_flush_dynamic_state(
    struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint32_t draw_id,
    struct agx_draw draw, bool ordinary_draw_path,
@@ -10231,18 +10235,81 @@ hk_prelink_pipeline_fragment(struct hk_device *dev,
  * flush -- has already run, otherwise it answers for a different draw than the
  * one that gets recorded.
  */
+/* Whether the pending graphics root differs from the last uploaded one in
+ * a byte a bound shader may read (hk_root_push_mask.h): only then must a
+ * draw publish it. Any doubt (no previous upload, another layout, a stage
+ * whose reads are unknown) says it does. */
+static bool
+hk_cmd_root_dirty_observed(struct hk_cmd_buffer *cmd)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+   struct hk_descriptor_state *desc = &gfx->descriptors;
+   if (!desc->root_dirty)
+      return false;
+   if (unlikely(debug_get_option_no_push_filter()))
+      return true;
+
+   static_assert(offsetof(struct hk_root_descriptor_table, root_desc_addr) == 0,
+                 "the root address leads the root");
+   const size_t root_size = sizeof(desc->root);
+   if (!agx_native_graphics(&dev->dev) || !desc->uploaded_root.cpu ||
+       desc->uploaded_root_size != root_size ||
+       desc->generation - desc->uploaded_root_generation !=
+          desc->push_generation - desc->uploaded_push_generation ||
+       desc->dynamic_buffer_end != desc->uploaded_dynamic_buffer_end ||
+       gfx->shaders[MESA_SHADER_TESS_CTRL] ||
+       gfx->shaders[MESA_SHADER_TESS_EVAL] ||
+       gfx->shaders[MESA_SHADER_GEOMETRY] || gfx->shaders[MESA_SHADER_MESH])
+      return true;
+
+   const struct hk_shader *stages[] = {hk_bound_hw_vs(gfx),
+                                       hk_bound_sw_vs(gfx), hk_bound_fs(cmd)};
+   uint64_t mask = 0;
+   for (unsigned i = 0; i < ARRAY_SIZE(stages); i++) {
+      if (!stages[i])
+         return true;
+      mask |= stages[i]->info.agx3_push_read_mask;
+   }
+   if (mask == ~UINT64_C(0))
+      return true;
+
+   const size_t hole_B = hk_root_descriptor_offset(dynamic_buffers) +
+                         desc->dynamic_buffer_end *
+                            sizeof(desc->root.dynamic_buffers[0]);
+   if (hk_root_diff_observed(desc->uploaded_root.cpu,
+                             (const uint8_t *)&desc->root, root_size,
+                             sizeof(desc->root.root_desc_addr), hole_B,
+                             hk_root_descriptor_offset(set_dynamic_buffer_start),
+                             hk_root_descriptor_offset(push), mask))
+      return true;
+   return false;
+}
+
+/* hk_gfx_republishes_render_state() without the base parameters. */
+static bool
+hk_gfx_republishes_other_state(struct hk_cmd_buffer *cmd)
+{
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+   struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
+
+   return vk_dynamic_graphics_state_any_dirty(dyn) || gfx->dirty ||
+          gfx->shaders_dirty || hk_bound_sw_vs(gfx)->b.info.uses_draw_id ||
+          hk_cmd_root_dirty_observed(cmd);
+}
+
 static bool
 hk_gfx_republishes_render_state(struct hk_cmd_buffer *cmd)
 {
    struct hk_graphics_state *gfx = &cmd->state.gfx;
-   struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
    struct hk_shader *sw_vs = hk_bound_sw_vs(gfx);
 
-   return vk_dynamic_graphics_state_any_dirty(dyn) || gfx->dirty ||
-          gfx->descriptors.root_dirty || gfx->shaders_dirty ||
-          sw_vs->b.info.uses_draw_id || sw_vs->b.info.uses_base_param ||
-          (gfx->linked[MESA_SHADER_VERTEX] &&
-           gfx->linked[MESA_SHADER_VERTEX]->b.uses_base_param);
+   const bool base_params =
+      sw_vs->b.info.uses_base_param ||
+      (gfx->linked[MESA_SHADER_VERTEX] &&
+       gfx->linked[MESA_SHADER_VERTEX]->b.uses_base_param);
+   return hk_gfx_republishes_other_state(cmd) ||
+          (base_params && !gfx->g17p_draw_table_continues);
 }
 
 /* The AGX3 VertexProgramVariant state update for pipeline_program and, on
@@ -10456,6 +10523,9 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       return;
    if (unlikely(dev->frame_anatomy))
       cs->anatomy_republish++;
+   /* Until hk_g17p_draw_table_publish() names the table again. */
+   cs->g17p_draw_table.published = 0;
+   hk_upload_stat(cmd, vs_publications, 1);
 
    struct hk_descriptor_state *desc = &cmd->state.gfx.descriptors;
 
@@ -10687,7 +10757,9 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    /* Direct draws use an immutable parameter block, reused while the values
     * match. Indirect draws always retain the execution-time GPU pointer. */
    if (gfx->linked[MESA_SHADER_VERTEX]->b.uses_base_param) {
-      if (agx_is_indirect(draw.b)) {
+      if (gfx->g17p_draw_table_slot >= 0) {
+         /* hk_g17p_draw_table_publish() */
+      } else if (agx_is_indirect(draw.b)) {
          gfx->draw_params = draw.b.ptr;
          gfx->g17p_draw_params_host_valid = false;
 
@@ -10713,6 +10785,7 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       gfx->draw_id_ptr = 0;
       gfx->g17p_draw_id_host_valid = false;
    }
+   hk_g17p_draw_table_publish(cmd, cs);
 
    bool topology_changed = false;
    if (IS_DIRTY(IA_PRIMITIVE_TOPOLOGY) || gt_dirty || vgt_dirty || IS_SHADER_DIRTY(MESH)) {
@@ -11309,6 +11382,103 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    hk_cmd_bind_graphics_shader(cmd, MESA_SHADER_GEOMETRY, gs);
 }
 
+/* Give a direct draw of a draw-parameter table shader a table slot and
+ * write its base parameters there (hk_g17p_draw_table.h). A draw that
+ * cannot take one keeps g17p_draw_table_slot at -1 and publishes its
+ * parameters in mode 0. */
+static void
+hk_g17p_draw_table_assign(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+                          const struct agx_draw *draw, bool other_state)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+   struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
+
+   if (!agx_native_graphics(&dev->dev) || agx_is_indirect(draw->b) ||
+       !hk_g17p_draw_table_bound(gfx) ||
+       !hk_g17p_draw_table_slots(&cs->g17p_draw_table, other_state))
+      return;
+
+   const struct hk_shader *vs =
+      &gfx->shaders[MESA_SHADER_VERTEX]->variants[HK_VS_VARIANT_HW];
+   uint64_t ranges[AGX_MAX_ATTRIBS];
+   uint32_t strides[AGX_MAX_ATTRIBS];
+   unsigned n = 0;
+   if (draw->indexed && draw->index_size == AGX_INDEX_SIZE_U32) {
+      u_foreach_bit(a, vs->info.vs.attribs_read) {
+         if (!(dyn->vi->attributes_valid & BITFIELD_BIT(a)))
+            continue;
+         const unsigned binding = dyn->vi->attributes[a].binding;
+         if (dyn->vi->bindings[binding].input_rate !=
+             VK_VERTEX_INPUT_RATE_VERTEX)
+            continue;
+         ranges[n] = gfx->vb[binding].range;
+         strides[n++] = dyn->vi_binding_strides[binding];
+      }
+   }
+   const unsigned bits = hk_g17p_draw_table_bits(
+      draw->indexed, agx_index_size_to_B(draw->index_size), draw->b.count[0],
+      vs->info.g17p_reads_vertex_index,
+      dev->vk.enabled_features.robustBufferAccess2 ||
+         dev->vk.enabled_features.pipelineRobustness,
+      ranges, strides, n);
+   if (!bits)
+      return;
+
+   struct hk_g17p_draw_table_cursor *c = &cs->g17p_draw_table;
+   if (hk_g17p_draw_table_full(c, bits)) {
+      /* The entries, then the uniform cells: their address and slot shift. */
+      const uint32_t size = HK_G17P_DRAW_TABLE_SLOTS * 8;
+      struct agx_ptr t =
+         hk_pool_alloc(cmd, size + 16, HK_G17P_DRAW_TABLE_ALIGN);
+      if (!t.cpu)
+         return;
+      const uint32_t cells[4] = {(uint32_t)t.gpu, (uint32_t)(t.gpu >> 32),
+                                 32 - bits, 0};
+      memcpy((uint8_t *)t.cpu + size, cells, sizeof(cells));
+      cs->g17p_draw_table_map = t.cpu;
+      c->header = t.gpu + size;
+      c->bits = bits;
+      c->next = 0;
+   }
+
+   const uint32_t slot = c->next++;
+   cs->g17p_draw_table_map[2 * slot] =
+      draw->indexed ? (uint32_t)draw->index_bias : draw->start;
+   cs->g17p_draw_table_map[2 * slot + 1] = draw->start_instance;
+   gfx->g17p_draw_table_slot = slot;
+   hk_upload_stat(cmd, draw_table_slots, 1);
+   gfx->g17p_draw_table_continues =
+      !hk_g17p_draw_table_republishes(c, false, true, true);
+}
+
+/* The uniforms of a republication of a draw-parameter table shader: the
+ * table's cells for a slotted draw; for any other, its
+ * {first, first_instance} (already in gfx->draw_params) and a zero mode
+ * word. Runs after the draw parameters and draw id are set. */
+static void
+hk_g17p_draw_table_publish(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+   if (!hk_g17p_draw_table_bound(gfx))
+      return;
+
+   if (gfx->g17p_draw_table_slot >= 0) {
+      gfx->draw_params = cs->g17p_draw_table.header;
+      gfx->draw_id_ptr = cs->g17p_draw_table.header + 8;
+      gfx->g17p_draw_params_host_valid = false;
+      cs->g17p_draw_table.published = cs->g17p_draw_table.header;
+   } else {
+      /* A direct draw's uploaded parameters end with a zero mode word; an
+       * indirect draw's come from its record, so the zero page supplies it. */
+      gfx->draw_id_ptr = gfx->g17p_draw_params_host_valid
+                            ? gfx->draw_params + 8
+                            : AGX_ZERO_PAGE_ADDRESS;
+      cs->g17p_draw_table.published = 0;
+   }
+   gfx->g17p_draw_id_host_valid = false;
+}
+
 static __attribute__((hot)) struct hk_cs *
 hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
                    struct agx_draw *draw, bool *needs_idx_robust,
@@ -11541,7 +11711,16 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
     * the last point at which nothing of this draw has been written to the
     * stream yet.  Both halves are required: the republication is the hazard,
     * and a split has to happen before the record it protects. */
+   gfx->g17p_draw_table_slot = -1;
+   gfx->g17p_draw_table_continues = false;
+   const bool other_state = hk_gfx_republishes_other_state(cmd);
+   if (ordinary_draw_path && !*needs_idx_robust)
+      hk_g17p_draw_table_assign(cmd, cs, draw, other_state);
+   cs->g17p_draw_table.last_other = other_state;
+
    const bool republishes = hk_gfx_republishes_render_state(cmd);
+   if (gfx->descriptors.root_dirty && !republishes)
+      hk_upload_stat(cmd, root_unread_push_skips, 1);
 
    /* The HAL200 draw-state selector holds 16-bit scissor and
     * depth-bias indices. A stream whose arrays are about to exceed that
@@ -11813,6 +11992,18 @@ hk_g17p_emit_draw(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t *out,
 
    if (!hk_g17p_draw_primitive_supported(topology) || !draw.b.count[1])
       goto refused;
+
+   /* A draw in a draw-parameter table slot carries the slot in its raw
+    * vertex indices; the shader adds the table's base vertex. */
+   if (cmd->state.gfx.g17p_draw_table_slot >= 0) {
+      const uint32_t encoded =
+         hk_g17p_draw_table_encode(cmd->state.gfx.g17p_draw_table_slot,
+                                   cs->g17p_draw_table.bits);
+      if (draw.indexed)
+         draw.index_bias = (int32_t)encoded;
+      else
+         draw.start = encoded;
+   }
 
    uint32_t w[10];
    unsigned n = 0;
@@ -12922,6 +13113,7 @@ hk_g17p_emit_indirect_record(struct hk_cmd_buffer *cmd, uint16_t draw_id,
             draw.b.ptr +
             (draw.indexed ? offsetof(VkDrawIndexedIndirectCommand, vertexOffset)
                           : offsetof(VkDrawIndirectCommand, firstVertex));
+         gfx->g17p_draw_table_slot = -1;
       } else {
          gfx->draw_params = 0;
       }
@@ -12933,6 +13125,7 @@ hk_g17p_emit_indirect_record(struct hk_cmd_buffer *cmd, uint16_t draw_id,
          gfx->draw_id_ptr = 0;
          gfx->g17p_draw_id_host_valid = false;
       }
+      hk_g17p_draw_table_publish(cmd, cs);
 
       /* Only the native bind tail consumes this (hk_agx3_publish_vertex_state),
        * as in hk_flush_dynamic_state_slow(). */

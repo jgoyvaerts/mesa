@@ -41,6 +41,7 @@
 #include "hk_cs_root_size.h"
 #include "hk_descriptor_set.h"
 #include "hk_drm_render_core.h"
+#include "hk_g17p_draw_table.h"
 #include "hk_ioto_arena_core.h"
 #include "hk_pipeline_statistics_core.h"
 
@@ -280,6 +281,11 @@ struct hk_upload_stats {
    uint64_t draw_param_uploads, draw_param_bytes, draw_param_reuses;
    uint64_t draw_id_uploads, draw_id_bytes, draw_id_reuses;
    uint64_t constant_uploads, constant_bytes, constant_reuses;
+   /* Root uploads by the fields that differ from the previous upload. */
+   uint64_t root_diff_push, root_diff_attrib, root_diff_dynamic,
+      root_diff_sets, root_diff_other;
+   /* Vertex state publications, and draws in a draw-parameter table slot. */
+   uint64_t vs_publications, draw_table_slots, root_unread_push_skips;
 };
 
 #define hk_upload_stat(cmd, field, value)                                      \
@@ -411,6 +417,10 @@ struct hk_descriptor_state {
    struct agx_ptr uploaded_root;
    uint32_t uploaded_root_size;
    uint64_t uploaded_root_generation;
+   /* The generation bumps push constants made, and that count at the last
+    * root upload: a root whose only bumps since were pushes differs only in
+    * push bytes. */
+   uint64_t push_generation, uploaded_push_generation;
    uint8_t uploaded_dynamic_buffer_end;
 
    /* One past the highest root.dynamic_buffers entry any bind wrote. Later
@@ -741,10 +751,18 @@ struct hk_graphics_state {
 
    uint64_t draw_params;
    uint64_t draw_id_ptr;
-   uint32_t g17p_draw_params_value[2];
+   /* The last uploaded draw parameters; [2] marks a 12-byte upload with a
+    * zero draw-parameter table mode word (hk_cmd_upload_draw_params()). */
+   uint32_t g17p_draw_params_value[3];
    uint32_t g17p_draw_id_value;
    bool g17p_draw_params_host_valid;
    bool g17p_draw_id_host_valid;
+   /* This draw's draw-parameter table slot, or -1 (hk_g17p_draw_table.h),
+    * and whether the stream's published vertex state already reads its
+    * table, so base parameters alone do not republish. Set for every draw
+    * by hk_flush_gfx_state(). */
+   int g17p_draw_table_slot;
+   bool g17p_draw_table_continues;
 
    struct hk_g17p_prepared_bind_tail g17p_bind_tail;
    /* The last complete build of g17p_bind_tail, whose other fields still
@@ -1337,6 +1355,10 @@ struct hk_cs {
     */
    uint32_t restart_index;
    bool restart_index_set;
+
+   /* G17P draw-parameter table of this stream; the CPU map of its entries. */
+   struct hk_g17p_draw_table_cursor g17p_draw_table;
+   uint32_t *g17p_draw_table_map;
 };
 
 static inline unsigned
@@ -1933,6 +1955,30 @@ hk_bound_hw_vs(struct hk_graphics_state *gfx)
       return &tes->variants[HK_VS_VARIANT_HW];
    else
       return &vs->variants[HK_VS_VARIANT_HW];
+}
+
+/* The bound vertex shader reads its base parameters through the G17P
+ * draw-parameter table: it is the hardware vertex program, without
+ * tessellation, geometry or mesh stages. */
+static inline bool
+hk_g17p_draw_table_bound(struct hk_graphics_state *gfx)
+{
+   struct hk_api_shader *vs = gfx->shaders[MESA_SHADER_VERTEX];
+   return vs && !gfx->shaders[MESA_SHADER_TESS_EVAL] &&
+          !gfx->shaders[MESA_SHADER_GEOMETRY] &&
+          !gfx->shaders[MESA_SHADER_MESH] &&
+          vs->variants[HK_VS_VARIANT_HW].info.g17p_draw_table &&
+          !vs->variants[HK_VS_VARIANT_HW].b.info.uses_draw_id;
+}
+
+/* A draw-parameter table vertex shader whose mode word directly follows
+ * its parameters, so that one uniform range loads all three. */
+static inline bool
+hk_g17p_table_words(const struct hk_cmd_buffer *cmd, const struct hk_shader *s)
+{
+   const struct hk_graphics_state *gfx = &cmd->state.gfx;
+   return s->info.g17p_draw_table && gfx->draw_params &&
+          gfx->draw_id_ptr == gfx->draw_params + 8;
 }
 
 static inline struct hk_shader *

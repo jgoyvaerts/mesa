@@ -1377,6 +1377,7 @@ hk_push_constants(UNUSED struct hk_cmd_buffer *cmd,
    memcpy(desc->root.push + info->offset, info->pValues, info->size);
    desc->root_dirty = true;
    desc->generation++;
+   desc->push_generation++;
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -2492,16 +2493,19 @@ hk_g17p_graphics_uniform_ranges(
        * attribute bases/clamps. Direct draws already upload baseVertex and
        * firstInstance together; native Ioto can bind them without a prolog
        * specialization, shader patch or pre-render compute dispatch. */
+      /* A draw-parameter table shader's mode word (DRAW_ID) usually follows
+       * its parameters in memory: load all three in one range. */
+      const bool table_words = hk_g17p_table_words(cmd, s);
       if (cmd->state.gfx.draw_params) {
          sources[count] = HK_G17P_RANGE_SOURCE_DRAW_PARAMS;
          ranges[count++] = (struct agx3_ioto_uniform_range){
             .start_halfs = uniform_base +
                            AGX_ABI_VUNI_FIRST_VERTEX(nr_attribs),
-            .size_halfs = 4,
+            .size_halfs = table_words ? 6 : 4,
             .address = cmd->state.gfx.draw_params,
          };
       }
-      if (cmd->state.gfx.draw_id_ptr) {
+      if (cmd->state.gfx.draw_id_ptr && !table_words) {
          /* The shader reads gl_DrawID as a single half, but a uniform range
           * is loaded in 32-bit dwords -- agx3_ioto_uniform_program.c rejects
           * an odd size_halfs outright -- so a one-half range could never be
@@ -2874,7 +2878,8 @@ hk_g17p_launch_flags(const struct hk_cmd_buffer *cmd, const struct hk_shader *s)
    const struct hk_graphics_state *gfx = &cmd->state.gfx;
    uint8_t flags = gfx->root ? 1 : 0;
    if (s->info.stage == MESA_SHADER_VERTEX) {
-      flags |= (gfx->draw_params ? 2 : 0) | (gfx->draw_id_ptr ? 4 : 0);
+      flags |= (gfx->draw_params ? 2 : 0) | (gfx->draw_id_ptr ? 4 : 0) |
+               (hk_g17p_table_words(cmd, s) ? 32 : 0);
    } else if (s->info.stage == MESA_SHADER_FRAGMENT) {
       flags |= (hk_cmd_uses_blend_constant(cmd) ? 8 : 0) |
                (agx_tilebuffer_spills(&gfx->render.tilebuffer) ? 16 : 0);

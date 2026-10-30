@@ -365,6 +365,26 @@ if with_tests
   )
 
   test(
+    'hk_root_push_mask',
+    executable(
+      'hk_root_push_mask_test',
+      files('tests/test-hk-root-push-mask.c'),
+      include_directories : [include_directories('.')],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'hk_g17p_draw_table',
+    executable(
+      'hk_g17p_draw_table_test',
+      files('tests/test-hk-g17p-draw-table.c'),
+      include_directories : [include_directories('.')],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'hk_g17p_restart_state',
     executable(
       'hk_g17p_restart_state_test',
