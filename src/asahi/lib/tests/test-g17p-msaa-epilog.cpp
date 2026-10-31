@@ -71,10 +71,12 @@ TEST_F(G17PMSAAEpilog, M5SampleAlphaCoveragePrecedesAllColourStores)
  * not update coverage again after a main part that applied alpha-to-coverage. */
 TEST_F(G17PMSAAEpilog, AlphaCoverageInMainLeavesNoUpdateInTheEpilog)
 {
+   for (unsigned samples : {1u, 2u})
    for (bool a2c_in_main : {false, true}) {
+      SCOPED_TRACE(samples);
       SCOPED_TRACE(a2c_in_main);
       agx_fs_epilog_key fs = {};
-      fs.nr_samples = 2;
+      fs.nr_samples = samples;
       fs.max_sample_size_B = 248;
       fs.max_bytes_per_tile = 65536;
       fs.max_samples_per_tile = 2048;

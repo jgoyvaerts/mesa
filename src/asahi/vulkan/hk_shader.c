@@ -130,8 +130,9 @@ struct hk_fs_key {
     */
    bool discard_color_outputs : 1;
 
-   /** G17P: multisampled with alpha-to-coverage statically on and every sample
-    * enabled, so the main part can apply it (agx_fs_epilog_key::a2c_in_main).
+   /** G17P: alpha-to-coverage statically on and every sample enabled, so the
+    * main part can apply it (agx_fs_epilog_key::a2c_in_main). At one sample a
+    * main part kill followed by the epilog's testing update hangs the 3D stage.
     */
    bool static_a2c : 1;
 
@@ -670,7 +671,6 @@ hk_populate_fs_key(struct hk_fs_key *key,
        !BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES) &&
        !BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_MS_SAMPLE_MASK) &&
        state->ms->alpha_to_coverage_enable &&
-       state->ms->rasterization_samples > 1 &&
        (state->ms->sample_mask &
         BITFIELD_MASK(state->ms->rasterization_samples)) ==
           BITFIELD_MASK(state->ms->rasterization_samples))
